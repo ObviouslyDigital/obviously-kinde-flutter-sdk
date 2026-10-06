@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.0+obv.1] - 2026-10-06
+
+Obviously fork of 2.0.0.
+
+- `AdditionalParameters.promptValues` sets the OIDC `prompt` for `login()`. Null keeps `prompt=login`, an empty list sends no prompt and `['none']` requests a silent check.
+- `logout(endSessionOnWeb: true)` ends the Kinde session on web through the logout endpoint. The default is unchanged.
+
 ## [2.0.0] - 2025-12-11
 
 ### Breaking Changes
