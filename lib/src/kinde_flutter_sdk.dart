@@ -344,7 +344,6 @@ class KindeFlutterSDK with TokenUtils {
     final internalAdditionalParams =
         InternalAdditionalParameters.fromUserAdditionalParams(additionalParams);
     internalAdditionalParams.audience = _config!.audience;
-    internalAdditionalParams.promptValues = ['login'];
     internalAdditionalParams.scopes = _config!.scopes;
     return internalAdditionalParams;
   }

@@ -72,13 +72,22 @@ abstract class BaseAdditionalParameters {
 }
 
 class AdditionalParameters extends BaseAdditionalParameters {
+  /// OIDC `prompt` values for the authorization request.
+  ///
+  /// Null keeps the SDK default of `login`, which ignores any existing Kinde
+  /// session. An empty list sends no prompt, so Kinde reuses an existing
+  /// session and shows its form only without one. `['none']` asks for a
+  /// silent check that returns `login_required` when there is no session.
+  final List<String>? promptValues;
+
   const AdditionalParameters(
       {super.lang,
       super.connectionId,
       super.loginHint,
       super.orgCode,
       super.planInterest,
-      super.pricingTableKey});
+      super.pricingTableKey,
+      this.promptValues});
 }
 
 class InternalAdditionalParameters extends BaseAdditionalParameters {
@@ -107,8 +116,11 @@ class InternalAdditionalParameters extends BaseAdditionalParameters {
       });
 
   factory InternalAdditionalParameters.fromUserAdditionalParams(
-      AdditionalParameters userParams) {
+      AdditionalParameters userParams,
+      {List<String> defaultPromptValues = const ['login']}) {
+    final promptValues = userParams.promptValues ?? defaultPromptValues;
     return InternalAdditionalParameters(
+      promptValues: promptValues.isEmpty ? null : promptValues,
       lang: userParams.lang,
       connectionId: userParams.connectionId,
       loginHint: userParams.loginHint,
