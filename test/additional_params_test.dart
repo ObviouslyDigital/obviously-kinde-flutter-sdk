@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kinde_flutter_sdk/src/additional_params.dart';
+import 'package:kinde_flutter_sdk/src/model/kinde_prompt.dart';
 
 void main() {
   group('InternalAdditionalParameters.fromUserAdditionalParams prompt', () {
@@ -14,34 +15,19 @@ void main() {
 
     test('sends the caller prompt instead of the default', () {
       final params = InternalAdditionalParameters.fromUserAdditionalParams(
-        const AdditionalParameters(promptValues: ['none']),
+        const AdditionalParameters(prompt: KindePrompt.none),
       );
 
       expect(params.toWebParams()['prompt'], 'none');
     });
 
-    test('omits prompt when the caller passes an empty list', () {
+    test('omits prompt for useSession', () {
       final params = InternalAdditionalParameters.fromUserAdditionalParams(
-        const AdditionalParameters(promptValues: []),
+        const AdditionalParameters(
+            orgCode: 'org_1', prompt: KindePrompt.useSession),
       );
 
       expect(params.promptValues, isNull);
-      expect(params.toWebParams().containsKey('prompt'), isFalse);
-    });
-
-    test('joins several prompt values with a space', () {
-      final params = InternalAdditionalParameters.fromUserAdditionalParams(
-        const AdditionalParameters(promptValues: ['login', 'consent']),
-      );
-
-      expect(params.toWebParams()['prompt'], 'login consent');
-    });
-
-    test('keeps the other caller parameters', () {
-      final params = InternalAdditionalParameters.fromUserAdditionalParams(
-        const AdditionalParameters(orgCode: 'org_1', promptValues: []),
-      );
-
       expect(params.toWebParams(), {'org_code': 'org_1'});
     });
   });

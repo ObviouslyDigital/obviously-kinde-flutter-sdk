@@ -60,14 +60,14 @@ void main() async {
 
       test('sends the caller prompt', () async {
         final prompt = await promptSentBy(() => KindeFlutterSDK.instance.login(
-            additionalParams: const AdditionalParameters(promptValues: ['none'])));
+            additionalParams: const AdditionalParameters(prompt: KindePrompt.none)));
 
         expect(prompt, ['none']);
       });
 
-      test('sends no prompt when the caller passes an empty list', () async {
+      test('sends no prompt for useSession', () async {
         final prompt = await promptSentBy(() => KindeFlutterSDK.instance.login(
-            additionalParams: const AdditionalParameters(promptValues: [])));
+            additionalParams: const AdditionalParameters(prompt: KindePrompt.useSession)));
 
         expect(prompt, isNull);
       });
