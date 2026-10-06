@@ -4,6 +4,7 @@ import 'dart:math';
 
 import 'package:kinde_flutter_sdk/src/additional_params.dart';
 import 'package:kinde_flutter_sdk/src/kinde_secure_storage/kinde_secure_storage_i.dart';
+import 'package:kinde_flutter_sdk/src/utils/helpers.dart';
 import 'package:kinde_flutter_sdk/src/utils/kinde_custom_types.dart';
 import 'package:kinde_flutter_sdk/src/utils/kinde_debug_print.dart';
 import 'package:kinde_flutter_sdk/src/kinde_secure_storage/kinde_secure_storage.dart';
@@ -217,17 +218,21 @@ class KindeFlutterSDK with TokenUtils {
   /// - [dio] - Optional Dio client for direct HTTP logout fallback (macOS only)
   /// - [macosLogoutWithoutRedirection] - On macOS, use direct HTTP logout without browser redirect (default: true)
   /// - [timeout] - Timeout duration for logout request (default: 30 seconds)
+  /// - [endSessionOnWeb] - On web, end the Kinde session through the logout
+  ///   endpoint before returning to [logoutRedirectUri], so the next login
+  ///   cannot reuse it (default: false)
   Future<void> logout({
     Dio? dio,
     bool macosLogoutWithoutRedirection = true,
     Duration timeout = const Duration(seconds: 30),
+    bool endSessionOnWeb = false,
   }) async {
     if (authState == null) {
       kindeDebugPrint(methodName: "logout", message: "AuthState is null.");
       return;
     }
     if (kIsWeb) {
-      await _handleWebLogout();
+      await _handleWebLogout(endSession: endSessionOnWeb);
     } else {
       await _handleNonWebLogout(
           dio: dio,
@@ -278,10 +283,14 @@ class KindeFlutterSDK with TokenUtils {
     }
   }
 
-  Future<void> _handleWebLogout() async {
+  Future<void> _handleWebLogout({required bool endSession}) async {
     if (_config?.logoutRedirectUri != null &&
         _config!.logoutRedirectUri.isNotEmpty) {
-      KindeWeb.instance.logout(_config!.logoutRedirectUri);
+      KindeWeb.instance.logout(webLogoutUrl(
+        endSessionEndpoint: _serviceConfiguration.endSessionEndpoint!,
+        logoutRedirectUri: _config!.logoutRedirectUri,
+        endSession: endSession,
+      ));
     }
   }
 
