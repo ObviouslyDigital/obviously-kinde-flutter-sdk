@@ -56,6 +56,7 @@ class KindeFlutterSDK with TokenUtils {
   late KindeApi _kindeApi;
   late KeysApi _keysApi;
   late TokenApi _tokenApi;
+  Future<String?>? _tokenRefresh;
   late AuthorizationServiceConfiguration _serviceConfiguration;
 
   static KindeFlutterSDK get instance {
@@ -538,12 +539,21 @@ class KindeFlutterSDK with TokenUtils {
   }
 
   Future<String?> getToken({bool forceRefresh = false}) async {
+    // Another tab may have refreshed since this one loaded its tokens.
+    await _store.reloadAuthState();
+
     // Return existing token if authenticated and not forcing refresh
     if (!forceRefresh && await isAuthenticated()) {
       return _store.authState?.accessToken;
     }
 
-    // Proceed with token refresh
+    return _tokenRefresh ??= _refreshToken()
+        .whenComplete(() => _tokenRefresh = null);
+  }
+
+  /// Exchanges the refresh token for new tokens. Callers share one request,
+  /// so a timer and a manual refresh never send the same refresh token twice.
+  Future<String?> _refreshToken() async {
     final version = await _getVersion();
     final versionParam = 'Flutter/$version';
     try {
@@ -552,11 +562,15 @@ class KindeFlutterSDK with TokenUtils {
           code: KindeErrorCode.sessionExpiredOrInvalid.code,
         );
       }
+      final previousRefreshToken = _store.authState!.refreshToken;
       final data = await _tokenApi.retrieveToken(
           versionParam,
           _store.authState!.createRequestTokenParam()
             ..putIfAbsent(_clientIdParamName, () => _config!.authClientId));
-      _store.authState = AuthState.fromJson(data as Map<String, dynamic>);
+      // RFC 6749 section 6: a response without a refresh token keeps the old one.
+      final tokens = Map<String, dynamic>.from(data);
+      tokens['refresh_token'] ??= previousRefreshToken;
+      _store.authState = AuthState.fromJson(tokens);
       _kindeApi.setBearerAuth(_bearerAuth, _store.authState?.accessToken ?? '');
       return _store.authState?.accessToken;
     } catch (e, st) {

@@ -43,7 +43,8 @@ class Store {
 
   set authState(AuthState? value) {
     _cachedAuthState = value;
-    _writeAuthState(value);
+    _authStateWrite =
+        _authStateWrite.then((_) => _writeAuthState(value));
   }
 
   Keys? get keys {
@@ -58,12 +59,20 @@ class Store {
 
   // Cache to support synchronous getters
   AuthState? _cachedAuthState;
+  Future<void> _authStateWrite = Future.value();
   Keys? _cachedKeys;
 
   // Load cached values from storage
   Future<void> loadFromStorage() async {
     await _readAuthState();
     await _readKeys();
+  }
+
+  /// Waits for this instance's pending writes, so a reload never reads the
+  /// value from before them.
+  Future<void> reloadAuthState() async {
+    await _authStateWrite;
+    await _readAuthState();
   }
 
   Future<void> _readAuthState() async {

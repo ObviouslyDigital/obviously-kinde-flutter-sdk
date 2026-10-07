@@ -1,6 +1,6 @@
 name: kinde_flutter_sdk
 description: The Kinde SDK For Flutter.
-version: 2.0.0+obv.2
+version: 2.0.0+obv.3
 homepage: https://github.com/kinde-oss/kinde-flutter-sdk
 
 environment:
