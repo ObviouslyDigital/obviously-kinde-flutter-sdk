@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
@@ -22,7 +23,12 @@ void main() {
   const secureStorageChannel =
       MethodChannel('plugins.it_nomads.com/flutter_secure_storage');
   final secureStorage = <String, String>{};
-  final tokenRequests = <http.Request>[];
+  final codeExchanges = <http.Request>[];
+  late DioAdapter refreshAdapter;
+  Completer<void>? refreshGate;
+  var currentUrl = appUrl;
+
+  KindeFlutterSDK sdk() => KindeFlutterSDK.instance;
 
   setUpAll(() async {
     mockChannels.setupMockChannel();
@@ -52,8 +58,14 @@ void main() {
     });
 
     final dio = Dio();
-    DioAdapter(dio: dio).onGet(
-        '/.well-known/jwks.json', (server) => server.reply(200, {'keys': []}));
+    refreshAdapter = DioAdapter(dio: dio)
+      ..onGet('/.well-known/jwks.json',
+          (server) => server.reply(200, {'keys': []}));
+    dio.interceptors
+        .add(InterceptorsWrapper(onRequest: (options, handler) async {
+      if (options.path == '/oauth2/token') await refreshGate?.future;
+      handler.next(options);
+    }));
 
     await initializeKindeFlutterSdkForTest(
         authDomain: 'auth.example.com',
@@ -63,86 +75,142 @@ void main() {
         dio: dio);
     await KindeWeb.initialize(
         appBaseUrl: appUrl, secureStorage: KindeSecureStorage());
+    sdk().currentWebUrlOverride = () => currentUrl;
   });
 
   setUp(() async {
-    tokenRequests.clear();
+    codeExchanges.clear();
     secureStorage.clear();
-    await KindeFlutterSDK.instance.login();
+    refreshGate = null;
+    currentUrl = appUrl;
+    await sdk().login();
     secureStorage[SecureStorageKey.authRequestState] = loginState;
     final preferences = await SharedPreferences.getInstance();
     await preferences.setString('codeVerifier', 'codeVerifierOfTheLogin');
   });
 
-  Future<bool> completeLoginFrom(String url) => http.runWithClient(
-        () => KindeFlutterSDK.instance.completeLoginFromUrl(url),
-        () => MockClient((request) async {
-          tokenRequests.add(request);
-          return http.Response(
-            jsonEncode({
-              'access_token': 'switchedOrganisationAccessToken',
-              'refresh_token': 'switchedOrganisationRefreshToken',
-              'id_token': 'switchedOrganisationIdToken',
-              'token_type': 'bearer',
-              'expires_in': 3600,
-            }),
-            200,
-            headers: {'content-type': 'application/json'},
-          );
-        }),
-      );
+  Future<bool> completePendingLoginAt(String url) {
+    currentUrl = url;
+    return http.runWithClient(
+      sdk().completePendingLoginIfNeeded,
+      () => MockClient((request) async {
+        codeExchanges.add(request);
+        return http.Response(
+          jsonEncode({
+            'access_token': 'switchedOrganisationAccessToken',
+            'refresh_token': 'switchedOrganisationRefreshToken',
+            'id_token': 'switchedOrganisationIdToken',
+            'token_type': 'bearer',
+            'expires_in': 3600,
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }),
+    );
+  }
 
   test(
-      'exchanges the code of an organisation switch while tokens are stored, '
-      'replacing them', () async {
-    expect(KindeFlutterSDK.instance.authState?.accessToken, 'accessToken');
+      'exchanges a code whose state matches the login in progress while '
+      'tokens are stored, replacing them', () async {
+    expect(sdk().authState?.accessToken, 'accessToken');
 
     final completed =
-        await completeLoginFrom('$appUrl?code=switchCode&state=$loginState');
+        await completePendingLoginAt('$appUrl?code=switchCode&state=$loginState');
 
     expect(completed, isTrue);
-    expect(tokenRequests, hasLength(1));
-    expect(tokenRequests.single.url.toString(),
+    expect(codeExchanges, hasLength(1));
+    expect(codeExchanges.single.url.toString(),
         'https://auth.example.com/oauth2/token');
-    expect(tokenRequests.single.bodyFields, containsPair('code', 'switchCode'));
-    final authState = KindeFlutterSDK.instance.authState;
-    expect(authState?.accessToken, 'switchedOrganisationAccessToken');
-    expect(authState?.refreshToken, 'switchedOrganisationRefreshToken');
-    expect(authState?.idToken, 'switchedOrganisationIdToken');
+    expect(codeExchanges.single.bodyFields, containsPair('code', 'switchCode'));
+    expect(sdk().authState?.accessToken, 'switchedOrganisationAccessToken');
+    expect(sdk().authState?.refreshToken, 'switchedOrganisationRefreshToken');
+    expect(sdk().authState?.idToken, 'switchedOrganisationIdToken');
     expect(secureStorage[SecureStorageKey.authRequestState], isNull);
   });
 
-  test('never exchanges a code whose state is not the login in progress',
-      () async {
-    await expectLater(
-      completeLoginFrom('$appUrl?code=foreignCode&state=someOtherState'),
-      throwsA(isA<KindeError>()),
-    );
+  test(
+      'ignores a code whose state is not the login in progress, leaving that '
+      'login in progress', () async {
+    final completed = await completePendingLoginAt(
+        '$appUrl?code=foreignCode&state=someOtherState');
 
-    expect(tokenRequests, isEmpty);
-    expect(KindeFlutterSDK.instance.authState?.accessToken, 'accessToken');
+    expect(completed, isFalse);
+    expect(codeExchanges, isEmpty);
+    expect(sdk().authState?.accessToken, 'accessToken');
+    expect(secureStorage[SecureStorageKey.authRequestState], loginState);
   });
 
-  test('leaves a code from a finished login in the URL alone', () async {
+  test('ignores a code when no login is in progress', () async {
     secureStorage.remove(SecureStorageKey.authRequestState);
 
     final completed =
-        await completeLoginFrom('$appUrl?code=usedCode&state=$loginState');
+        await completePendingLoginAt('$appUrl?code=usedCode&state=$loginState');
 
     expect(completed, isFalse);
-    expect(tokenRequests, isEmpty);
-    expect(KindeFlutterSDK.instance.authState?.accessToken, 'accessToken');
+    expect(codeExchanges, isEmpty);
+    expect(sdk().authState?.accessToken, 'accessToken');
   });
 
-  test('does nothing without both a code and a state', () async {
+  test('ignores a URL without a state and either a code or an error',
+      () async {
     for (final url in [
       appUrl,
       '$appUrl?code=onlyCode',
+      '$appUrl?error=login_required',
       '$appUrl?state=$loginState',
     ]) {
-      expect(await completeLoginFrom(url), isFalse, reason: url);
+      expect(await completePendingLoginAt(url), isFalse, reason: url);
     }
 
-    expect(tokenRequests, isEmpty);
+    expect(codeExchanges, isEmpty);
+    expect(secureStorage[SecureStorageKey.authRequestState], loginState);
+  });
+
+  test(
+      'throws the error of a response to the login in progress and ends that '
+      'login', () async {
+    await expectLater(
+      completePendingLoginAt(
+          '$appUrl?error=login_required&error_description=Sign+in&state=$loginState'),
+      throwsA(isA<KindeError>()
+          .having((error) => error.code, 'code', 'login_required')),
+    );
+
+    expect(codeExchanges, isEmpty);
+    expect(secureStorage[SecureStorageKey.authRequestState], isNull);
+    expect(sdk().authState?.accessToken, 'accessToken');
+  });
+
+  test('ignores an error whose state is not the login in progress', () async {
+    final completed = await completePendingLoginAt(
+        '$appUrl?error=login_required&state=someOtherState');
+
+    expect(completed, isFalse);
+    expect(secureStorage[SecureStorageKey.authRequestState], loginState);
+  });
+
+  test(
+      'a refresh of the previous tokens that lands after the code exchange '
+      'keeps the exchanged tokens', () async {
+    refreshGate = Completer<void>();
+    refreshAdapter.onPost(
+      '/oauth2/token',
+      (server) => server.reply(200, {
+        'access_token': 'previousOrganisationAccessToken',
+        'refresh_token': 'previousOrganisationRefreshToken',
+        'expires_in': 3600,
+      }),
+      data: Matchers.any,
+    );
+    final lateRefresh = sdk().getToken(forceRefresh: true);
+    await pumpEventQueue();
+
+    await completePendingLoginAt('$appUrl?code=switchCode&state=$loginState');
+    refreshGate!.complete();
+
+    expect(await lateRefresh, 'switchedOrganisationAccessToken');
+    expect(sdk().authState?.accessToken, 'switchedOrganisationAccessToken');
+    expect(sdk().authState?.refreshToken, 'switchedOrganisationRefreshToken');
   });
 }

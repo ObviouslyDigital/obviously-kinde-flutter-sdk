@@ -2,7 +2,21 @@
 
 ## [2.0.0+obv.4] - 2026-11-12
 
-- On web, `completePendingLoginIfNeeded()` now exchanges the authorisation code even when tokens are already stored, so `login(orgCode: ...)` switches a signed-in user's organisation instead of keeping the old tokens. The code is exchanged only while this browser has a login in progress whose `state` matches, so a leftover or foreign code is never exchanged.
+- On web, `completePendingLoginIfNeeded()` acts only on a response whose `state` matches this browser's login in progress. Any other URL returns false and leaves the login in progress untouched.
+- A matching `code` is exchanged even when tokens are already stored, and its tokens replace them, so `login(orgCode: ...)` switches a signed-in user's organisation.
+- A matching `error` (for example `login_required`) ends the login in progress and is thrown as a `KindeError` whose code is the OAuth error.
+- A refresh that was in flight when a sign-in saved new tokens is dropped, and the refresh timer is reset, so the previous tokens are never written back.
+
+## [2.0.0+obv.3] - 2026-10-07
+
+- `getToken` reloads the auth state from storage before refreshing, so a tab picks up a refresh made in another tab.
+- A refresh response without a refresh token keeps the current one.
+- Concurrent refreshes share one token request.
+- Only a 400 or 401 from the token endpoint becomes `refreshTokenExpired`.
+
+## [2.0.0+obv.2] - 2026-10-06
+
+- `AdditionalParameters.prompt` takes a `KindePrompt` (`login`, `create`, `none`, `useSession`) in place of `promptValues`. Unset keeps `login`; `useSession` sends no prompt so Kinde reuses its session.
 
 ## [2.0.0+obv.1] - 2026-10-06
 
