@@ -681,6 +681,28 @@ void main() {
     );
   });
 
+  test(
+      'a tab restored from the back/forward cache can sign in again and keeps its earlier login',
+      () async {
+    late void Function() restorePage;
+    await KindeWeb.initialize(
+        appBaseUrl: appUrl,
+        secureStorage: KindeSecureStorage(),
+        listenForPageRestore: (onRestore) => restorePage = onRestore);
+    final before = await pendingStates();
+    await startLoginInThisTab();
+    final abandoned = (await pendingStates()).difference(before).single;
+
+    restorePage();
+    await startLoginInThisTab();
+
+    final started = (await pendingStates()).difference(before);
+    expect(started, hasLength(2));
+    expect(
+        await completePendingLoginAt('$appUrl?code=late&state=$abandoned'),
+        isTrue);
+  });
+
   test('a storage read that fails keeps the session', () async {
     failAuthStateReads = true;
 

@@ -134,3 +134,30 @@ test('(d) logins started in two tabs both complete', async ({ context, request }
   expect(tab1State.org).toBe('org_pool');
   expect(stats.codeExchanges).toBe(2);
 });
+
+test('(e) a tab shown again from the back/forward cache can start a new login', async ({ page, request }) => {
+  await resetKinde(request);
+  await openApp(page);
+  const authorizeRequests = [];
+  await page.route(`${kinde}/oauth2/auth**`, (route) => {
+    authorizeRequests.push(route.request().url());
+    return route.abort('aborted');
+  });
+
+  const first = JSON.parse(await page.evaluate(() => window.kindeLogin('org_pool')));
+  await expect.poll(() => authorizeRequests.length).toBe(1);
+  const whileLeaving = JSON.parse(await page.evaluate(() => window.kindeLogin('org_pool')));
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })));
+  await page.unroute(`${kinde}/oauth2/auth**`);
+  await startLogin(page, 'org_pool');
+  await approveLogin(page);
+  const state = await appState(page);
+  const stats = await kindeStats(request);
+
+  console.log('(e) results', JSON.stringify({ first, whileLeaving, state, stats }));
+  expect(first.error).toBeUndefined();
+  expect(whileLeaving.error).toBe('login-in-process');
+  expect(state.signedIn).toBe(true);
+  expect(state.org).toBe('org_pool');
+  expect(stats.codeExchanges).toBe(1);
+});
