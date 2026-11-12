@@ -68,7 +68,7 @@ class Store {
 
   // Load cached values from storage
   Future<void> loadFromStorage() async {
-    _cachedAuthState = await _readAuthState();
+    _cachedAuthState = (await _readAuthState()).authState;
     await _readKeys();
   }
 
@@ -76,11 +76,11 @@ class Store {
   Future<void> reloadAuthState() {
     final generation = _authStateGeneration;
     final reload = _writes.then((_) async {
-      final stored = await _readAuthState();
-      if (generation != _authStateGeneration) return;
+      final (:read, :authState) = await _readAuthState();
+      if (!read || generation != _authStateGeneration) return;
 
-      if (stored != _cachedAuthState) _authStateGeneration++;
-      _cachedAuthState = stored;
+      if (authState != _cachedAuthState) _authStateGeneration++;
+      _cachedAuthState = authState;
     });
     _writes = reload;
     return reload;
@@ -89,21 +89,25 @@ class Store {
   /// Completes once every write queued so far has reached storage.
   Future<void> flushWrites() => _writes;
 
-  Future<AuthState?> _readAuthState() async {
+  /// [read] is false when storage could not be read, which is not the same as nothing stored.
+  Future<({bool read, AuthState? authState})> _readAuthState() async {
     try {
       final currentData = await _storage.read(key: _authStateKey);
       if (currentData == null || currentData.toLowerCase() == "null") {
-        return null;
+        return (read: true, authState: null);
       }
-      return AuthState.fromJson(
-        jsonDecode(currentData) as Map<String, dynamic>,
+      return (
+        read: true,
+        authState: AuthState.fromJson(
+          jsonDecode(currentData) as Map<String, dynamic>,
+        ),
       );
     } catch (e) {
       kindeDebugPrint(
         methodName: "Store._readAuthState",
         message: "Error reading auth state: $e",
       );
-      return null;
+      return (read: false, authState: null);
     }
   }
 

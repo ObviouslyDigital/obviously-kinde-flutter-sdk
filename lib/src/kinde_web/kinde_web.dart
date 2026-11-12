@@ -128,10 +128,9 @@ class KindeWeb {
           additionalParameters: additionalParameters,
           codeVerifier: codeVerifier);
     } catch (e, st) {
+      _loginInProgress = false;
       await _pendingLogins.remove(authState);
       throw e is KindeError ? e : KindeError.fromError(e, st);
-    } finally {
-      _loginInProgress = false;
     }
   }
 

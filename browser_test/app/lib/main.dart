@@ -19,6 +19,10 @@ Future<void> main() async {
     logoutRedirectUri: '$origin/',
   );
 
+  final history = globalContext['history'] as JSObject;
+  history.callMethod('replaceState'.toJS, {'kindeTestMarker': true}.jsify(),
+      ''.toJS, Uri.base.toString().toJS);
+
   String? callbackError;
   try {
     await sdk.completePendingLoginIfNeeded();
@@ -33,6 +37,7 @@ Future<void> main() async {
       'org': authState == null ? null : sdk.getOrganization().orgCode,
       'refreshToken': authState?.refreshToken,
       'url': Uri.base.toString(),
+      'historyState': history['state'].dartify(),
     };
   }
 

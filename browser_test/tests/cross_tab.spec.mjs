@@ -82,6 +82,7 @@ test('(b) an organisation switch in one tab reaches the other on its next getTok
   console.log('(b) results', JSON.stringify({ tab1State, tab2Token }));
   expect(tab1State.org).toBe('org_meridian');
   expect(tab1State.url).not.toContain('code=');
+  expect(tab1State.historyState).toEqual({ kindeTestMarker: true });
   expect(tab2Token.error).toBeUndefined();
   expect(tab2Token.org).toBe('org_meridian');
 });
@@ -96,16 +97,19 @@ test('(c) a logout in one tab while the other refreshes signs both out', async (
 
   const refreshing = getToken(tab2, true);
   await expect.poll(async () => (await kindeStats(request)).refreshRequests).toBe(1);
-  await tab1.evaluate(() => { window.kindeLogout(); });
-  await waitForApp(tab1);
+  await tab1.evaluate(() => { window.kindeLeaving = true; window.kindeLogout(); });
+  await tab1.waitForFunction(() => window.kindeReady === true && window.kindeLeaving === undefined);
   const refreshed = await refreshing;
   const tab1State = await appState(tab1);
-  const tab2State = await appState(tab2);
+  const tab2Next = await getToken(tab2, false);
+  const stats = await kindeStats(request);
 
-  console.log('(c) results', JSON.stringify({ refreshed, tab1State, tab2State }));
-  expect(refreshed.error).toBe('session-expired-or-invalid');
+  console.log('(c) results', JSON.stringify({ refreshed, tab1State, tab2Next, stats }));
+  expect(stats.rejectedRefreshes).toBe(0);
+  expect(refreshed.error).toBeUndefined();
   expect(tab1State.signedIn).toBe(false);
-  expect(tab2State.signedIn).toBe(false);
+  expect(tab2Next.error).toBe('session-expired-or-invalid');
+  expect(tab2Next.signedIn).toBe(false);
   await tab2.reload();
   await waitForApp(tab2);
   expect((await appState(tab2)).signedIn).toBe(false);

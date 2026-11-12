@@ -75,6 +75,17 @@ mixin TokenUtils implements ClaimApi {
     return ClaimOrganization(_getClaim<String>(_orgCodeClaim) ?? '');
   }
 
+  /// The organization code in [accessToken], or null if it has none or cannot be read.
+  @protected
+  String? orgCodeOf(String accessToken) {
+    try {
+      final orgCode = parseToken(accessToken)[_orgCodeClaim];
+      return orgCode is String ? orgCode : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   @override
   Flag? getFlag({required String code, defaultValue, FlagType? type}) {
     Map<String, dynamic>? flagObj;

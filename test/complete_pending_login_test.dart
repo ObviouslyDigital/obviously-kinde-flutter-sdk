@@ -35,6 +35,9 @@ void main() {
   final codeExchanges = <http.Request>[];
   final exchangedAccessTokens = <String, String>{};
   final replacedUrls = <String>[];
+  final heldGates = <Completer<void>>[];
+  final bearerTokens = <String?>[];
+  var failAuthStateReads = false;
   final dio = Dio();
   late DioAdapter dioAdapter;
   late SharedPreferences preferences;
@@ -62,6 +65,9 @@ void main() {
           secureStorage[key!] = arguments['value'] as String;
           return null;
         case 'read':
+          if (key == authStateKey && failAuthStateReads) {
+            throw PlatformException(code: 'decrypt', message: 'cannot decrypt');
+          }
           final value = secureStorage[key];
           final gate = authStateReadGate;
           if (key == authStateKey && gate != null) {
@@ -114,13 +120,30 @@ void main() {
         dio: dio,
         currentUrl: () => currentUrl,
         replaceUrl: replacedUrls.add);
+    dio.interceptors.add(InterceptorsWrapper(onRequest: (options, handler) {
+      if (options.path == '/oauth2/v2/user_profile') {
+        bearerTokens.add(options.headers['Authorization'] as String?);
+      }
+      handler.next(options);
+    }));
+    dioAdapter.onGet('/oauth2/v2/user_profile', (server) => server.reply(200, {}));
     preferences = await SharedPreferences.getInstance();
+  });
+
+  tearDown(() async {
+    for (final gate in heldGates) {
+      if (!gate.isCompleted) gate.complete();
+    }
+    heldGates.clear();
+    failAuthStateReads = false;
+    await Store.instance.flushWrites();
   });
 
   setUp(() async {
     codeExchanges.clear();
     exchangedAccessTokens.clear();
     replacedUrls.clear();
+    bearerTokens.clear();
     secureStorage.clear();
     await preferences.clear();
     refreshRequests = 0;
@@ -130,8 +153,17 @@ void main() {
     authStateWriteGate = null;
     authStateDeleteGate = null;
     currentUrl = appUrl;
+    await KindeWeb.initialize(
+        appBaseUrl: appUrl, secureStorage: KindeSecureStorage());
     await sdk().login();
+    await Store.instance.flushWrites();
   });
+
+  Completer<void> hold() {
+    final gate = Completer<void>();
+    heldGates.add(gate);
+    return gate;
+  }
 
   String unsignedJwt(
       {Duration expiresIn = const Duration(hours: 1), String? orgCode}) {
@@ -164,17 +196,21 @@ void main() {
       }));
 
   /// Starts a web login as a newly opened tab would and returns its `state`.
+  Future<void> startLoginInThisTab({String? orgCode}) =>
+      KindeWeb.instance.startLoginFlow(
+        AuthorizationRequest('authClientId', appUrl,
+            serviceConfiguration: const AuthorizationServiceConfiguration(
+                authorizationEndpoint: 'https://auth.example.com/oauth2/auth',
+                tokenEndpoint: 'https://auth.example.com/oauth2/token')),
+        additionalParameters: InternalAdditionalParameters(orgCode: orgCode),
+      );
+
+  /// Starts a web login as a newly opened tab would and returns its `state`.
   Future<String> startLoginInNewTab({String? orgCode}) async {
     await KindeWeb.initialize(
         appBaseUrl: appUrl, secureStorage: KindeSecureStorage());
     final before = await pendingStates();
-    await KindeWeb.instance.startLoginFlow(
-      AuthorizationRequest('authClientId', appUrl,
-          serviceConfiguration: const AuthorizationServiceConfiguration(
-              authorizationEndpoint: 'https://auth.example.com/oauth2/auth',
-              tokenEndpoint: 'https://auth.example.com/oauth2/token')),
-      additionalParameters: InternalAdditionalParameters(orgCode: orgCode),
-    );
+    await startLoginInThisTab(orgCode: orgCode);
     return (await pendingStates()).difference(before).single;
   }
 
@@ -218,6 +254,7 @@ void main() {
 
   Future<void> storeTokensFromAnotherTab(
       {required String accessToken, required String refreshToken}) async {
+    await Store.instance.flushWrites();
     secureStorage[authStateKey] = jsonEncode(AuthState(
       accessToken: accessToken,
       refreshToken: refreshToken,
@@ -227,7 +264,7 @@ void main() {
   }
 
   Future<void> waitFor(bool Function() condition) async {
-    final deadline = DateTime.now().add(const Duration(seconds: 5));
+    final deadline = DateTime.now().add(const Duration(seconds: 15));
     while (!condition() && DateTime.now().isBefore(deadline)) {
       await Future<void>.delayed(const Duration(milliseconds: 50));
     }
@@ -414,7 +451,7 @@ void main() {
       'a refresh of the previous tokens that lands after the code exchange '
       'keeps the exchanged tokens', () async {
     final state = await startLoginInNewTab();
-    refreshGate = Completer<void>();
+    refreshGate = hold();
     replyToRefreshWithPreviousTokens();
     final lateRefresh = sdk().getToken(forceRefresh: true);
     await pumpEventQueue();
@@ -430,7 +467,7 @@ void main() {
   test(
       'a rejected refresh after another tab rotated the tokens returns the '
       'new tokens', () async {
-    refreshGate = Completer<void>();
+    refreshGate = hold();
     replyToRefresh(400, {'error': 'invalid_grant'});
     final lateRefresh = sdk().getToken(forceRefresh: true);
     await pumpEventQueue();
@@ -446,7 +483,7 @@ void main() {
   test(
       'a rejected refresh token surfaces while the stored tokens still carry '
       'it', () async {
-    refreshGate = Completer<void>();
+    refreshGate = hold();
     replyToRefresh(400, {'error': 'invalid_grant'});
     final lateRefresh = sdk().getToken(forceRefresh: true);
     await pumpEventQueue();
@@ -466,41 +503,37 @@ void main() {
       'a stored-state reload that resolves after the code exchange keeps the '
       'exchanged tokens', () async {
     final state = await startLoginInNewTab();
-    final readGate = authStateReadGate = Completer<void>();
+    final readGate = authStateReadGate = hold();
     final readStarted = authStateReadStarted = Completer<void>();
     final reload = Store.instance.reloadAuthState();
     await readStarted.future;
     authStateReadGate = null;
 
-    await completePendingLoginAt('$appUrl?code=switchCode&state=$state');
+    final completing =
+        completePendingLoginAt('$appUrl?code=switchCode&state=$state');
+    await pumpEventQueue();
     readGate.complete();
-    await reload;
+    await Future.wait([reload, completing]);
 
     expect(sdk().authState?.accessToken, switchedAccessToken);
   });
 
   test('a reload waiting on a write keeps a sign-in queued behind it',
       () async {
-    final first = await startLoginInNewTab();
-    final second = await startLoginInNewTab();
-    exchangedAccessTokens['secondCode'] = 'secondSignInAccessToken';
-    final writeGate = authStateWriteGate = Completer<void>();
-
-    await completePendingLoginAt('$appUrl?code=firstCode&state=$first');
+    final writeGate = authStateWriteGate = hold();
+    Store.instance.authState = const AuthState(accessToken: 'firstSignIn');
     final reload = Store.instance.reloadAuthState();
-    await completePendingLoginAt('$appUrl?code=secondCode&state=$second');
+    Store.instance.authState = const AuthState(accessToken: 'secondSignIn');
     writeGate.complete();
     await reload;
 
-    expect(sdk().authState?.accessToken, 'secondSignInAccessToken');
+    expect(sdk().authState?.accessToken, 'secondSignIn');
   });
 
   test('a clear while a reload waits on a write stays signed out', () async {
-    final state = await startLoginInNewTab();
-    final writeGate = authStateWriteGate = Completer<void>();
-    final deleteGate = authStateDeleteGate = Completer<void>();
-
-    await completePendingLoginAt('$appUrl?code=switchCode&state=$state');
+    final writeGate = authStateWriteGate = hold();
+    final deleteGate = authStateDeleteGate = hold();
+    Store.instance.authState = const AuthState(accessToken: 'signedIn');
     final reload = Store.instance.reloadAuthState();
     final clearing = Store.instance.clear();
     writeGate.complete();
@@ -515,7 +548,7 @@ void main() {
   test(
       'tokens another tab stored during a refresh make that refresh stale',
       () async {
-    refreshGate = Completer<void>();
+    refreshGate = hold();
     replyToRefreshWithPreviousTokens();
     final lateRefresh = sdk().getToken(forceRefresh: true);
     await pumpEventQueue();
@@ -529,7 +562,7 @@ void main() {
   });
 
   test('a refresh superseded by logout throws a signed-out error', () async {
-    refreshGate = Completer<void>();
+    refreshGate = hold();
     replyToRefreshWithPreviousTokens();
     final lateRefresh = sdk().getToken(forceRefresh: true);
     await pumpEventQueue();
@@ -576,21 +609,84 @@ void main() {
   });
 
   test(
-      'removes the authorisation response from the browser URL once a '
-      'callback is handled, and only then', () async {
+      'removes the authorisation response from the browser URL whenever one '
+      'is present, keeping other parameters', () async {
     final completedState = await startLoginInNewTab();
     final failedState = await startLoginInNewTab();
 
-    await completePendingLoginAt(
-        '$appUrl?code=switchCode&state=$completedState&tab=1#/home');
+    await completePendingLoginAt('$appUrl?code=switchCode&state=$completedState'
+        '&iss=https%3A%2F%2Fauth.example.com&tab=1#/home');
     await expectLater(
-      completePendingLoginAt(
-          '$appUrl?error=login_required&error_description=x&state=$failedState'),
+      completePendingLoginAt('$appUrl?error=login_required'
+          '&error_description=x&error_uri=y&state=$failedState'),
       throwsA(isA<KindeError>()),
     );
-    await completePendingLoginAt('$appUrl?code=foreign&state=unknownState');
+    await completePendingLoginAt(
+        '$appUrl?code=foreign&state=unknownState&session_state=s');
+    await completePendingLoginAt('$appUrl?tab=1');
 
-    expect(replacedUrls, ['$appUrl?tab=1#/home', appUrl]);
+    expect(replacedUrls, ['$appUrl?tab=1#/home', appUrl, appUrl]);
+  });
+
+  test(
+      'keeps repeated and encoded parameters when removing the authorisation '
+      'response', () async {
+    await completePendingLoginAt(
+        '$appUrl?tab=1&code=c&tab=2&q=a%20b%26c&state=unknownState');
+
+    expect(Uri.parse(replacedUrls.single).queryParametersAll, {
+      'tab': ['1', '2'],
+      'q': ['a b&c'],
+    });
+  });
+
+  test('completing a login waits until the new tokens are in storage',
+      () async {
+    final state = await startLoginInNewTab();
+    final writeGate = authStateWriteGate = hold();
+    var completed = false;
+
+    final completing =
+        completePendingLoginAt('$appUrl?code=switchCode&state=$state')
+            .whenComplete(() => completed = true);
+    await pumpEventQueue();
+    expect(completed, isFalse);
+    writeGate.complete();
+
+    expect(await completing, isTrue);
+    expect(secureStorage[authStateKey], contains(switchedAccessToken));
+  });
+
+  test("a reload that adopts another tab's tokens sends them as the bearer",
+      () async {
+    await storeTokensFromAnotherTab(
+        accessToken: unsignedJwt(), refreshToken: 'otherTabRefreshToken');
+
+    final token = await sdk().getToken();
+    try {
+      await sdk().getUserProfileV2();
+    } catch (_) {}
+
+    expect(bearerTokens, ['Bearer $token']);
+  });
+
+  test('a second login in a tab that is already leaving for Kinde is refused',
+      () async {
+    await startLoginInNewTab();
+
+    await expectLater(
+      startLoginInThisTab(),
+      throwsA(isA<KindeError>().having(
+          (error) => error.code, 'code', KindeErrorCode.loginInProcess.code)),
+    );
+  });
+
+  test('a storage read that fails keeps the session', () async {
+    failAuthStateReads = true;
+
+    await Store.instance.reloadAuthState();
+
+    expect(sdk().authState?.accessToken, 'accessToken');
   });
 
   test('removes a login left in the single slot after one unmatched look',
@@ -617,7 +713,7 @@ void main() {
     final state = await startLoginInNewTab();
     exchangedAccessTokens['shortLived'] =
         unsignedJwt(expiresIn: const Duration(seconds: 11));
-    final gate = refreshGate = Completer<void>();
+    final gate = refreshGate = hold();
     replyToRefresh(400, {'error': 'invalid_grant'});
 
     await completePendingLoginAt('$appUrl?code=shortLived&state=$state');
@@ -640,7 +736,7 @@ void main() {
     final state = await startLoginInNewTab();
     exchangedAccessTokens['shortLived'] =
         unsignedJwt(expiresIn: const Duration(seconds: 11));
-    final gate = refreshGate = Completer<void>();
+    final gate = refreshGate = hold();
     replyToRefreshWithPreviousTokens();
 
     await completePendingLoginAt('$appUrl?code=shortLived&state=$state');
@@ -654,6 +750,46 @@ void main() {
     await waitFor(() => refreshRequests == 2);
 
     expect(refreshRequests, 2, reason: 'the next background refresh');
+    await sdk().logout(dio: dio);
+  });
+
+  test('a background refresh that fails with a server error retries later',
+      () async {
+    final state = await startLoginInNewTab();
+    exchangedAccessTokens['shortLived'] =
+        unsignedJwt(expiresIn: const Duration(seconds: 11));
+    replyToRefresh(503, {'error': 'unavailable'});
+
+    await completePendingLoginAt('$appUrl?code=shortLived&state=$state');
+    await waitFor(() => refreshRequests == 1);
+    expect(refreshRequests, 1, reason: 'the first background refresh');
+    await waitFor(() => refreshRequests == 2);
+
+    expect(refreshRequests, 2, reason: 'the retry after the backoff');
+    await sdk().logout(dio: dio);
+  });
+
+  test(
+      "adopting another tab's nearly expired tokens waits before refreshing "
+      'again', () async {
+    final state = await startLoginInNewTab();
+    exchangedAccessTokens['shortLived'] =
+        unsignedJwt(expiresIn: const Duration(seconds: 11));
+    final gate = refreshGate = hold();
+    replyToRefreshWithPreviousTokens();
+
+    await completePendingLoginAt('$appUrl?code=shortLived&state=$state');
+    await waitFor(() => refreshRequests == 1);
+    await storeTokensFromAnotherTab(
+        accessToken: unsignedJwt(expiresIn: const Duration(seconds: 2)),
+        refreshToken: 'otherTabRefreshToken');
+    final adoptedAt = DateTime.now();
+    gate.complete();
+    await waitFor(() => refreshRequests == 2);
+
+    expect(refreshRequests, 2);
+    expect(DateTime.now().difference(adoptedAt),
+        greaterThanOrEqualTo(const Duration(seconds: 4)));
     await sdk().logout(dio: dio);
   });
 }

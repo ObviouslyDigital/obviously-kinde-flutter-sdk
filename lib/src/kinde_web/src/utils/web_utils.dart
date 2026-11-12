@@ -12,7 +12,7 @@ abstract class WebUtils {
   static String? get getCurrentUrl => window.location.href;
 
   static void replaceCurrentUrl(String url) =>
-      window.history.replaceState(null, '', url);
+      window.history.replaceState(window.history.state, '', url);
 
   static String? get getOriginUrl => window.location.origin;
 

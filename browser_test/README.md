@@ -7,8 +7,8 @@ Runs the SDK in real Chromium tabs that share one origin, against a local mock K
 | Test | Scenario | Passes when |
 |---|---|---|
 | (a) | Two tabs force a refresh at the same moment | Exactly one refresh request reaches the server, both tabs get the same new token, neither signs out |
-| (b) | Tab 1 switches organisation with `login(orgCode: ...)` | Tab 1's URL no longer carries `code`, and tab 2's next `getToken()` returns a token for the new organisation |
-| (c) | Tab 1 logs out while tab 2's refresh is in flight | Tab 2's refresh throws `session-expired-or-invalid`, and both tabs, including after a reload, are signed out |
+| (b) | Tab 1 switches organisation with `login(orgCode: ...)` | Tab 1's URL no longer carries `code` and keeps its `history.state`, and tab 2's next `getToken()` returns a token for the new organisation |
+| (c) | Tab 1 logs out while tab 2's refresh is in flight | The logout waits for the refresh lock, so tab 2's refresh completes first. Then tab 2's next `getToken()` throws `session-expired-or-invalid`, and both tabs, including after a reload, are signed out |
 | (d) | Both tabs start a login, then both complete in turn | Each completes with its own pending login, and the server sees two code exchanges |
 
 ## Pieces
