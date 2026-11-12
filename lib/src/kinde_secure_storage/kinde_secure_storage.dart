@@ -12,7 +12,9 @@ abstract class SecureStorageKey {
 
 class KindeSecureStorage implements KindeSecureStorageInterface {
   KindeSecureStorage({FlutterSecureStorage? secureStorage})
-      : _secureStorage = secureStorage ?? const FlutterSecureStorage();
+      : _secureStorage = secureStorage ??
+            const FlutterSecureStorage(
+                aOptions: AndroidOptions(resetOnError: false));
 
   final FlutterSecureStorage _secureStorage;
 

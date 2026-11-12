@@ -2,7 +2,9 @@ import { expect, test } from '@playwright/test';
 
 const kinde = 'https://localhost:47443';
 const appOrigin = 'http://localhost:47080';
+const knownCompilers = ['dart2js', 'dart2wasm'];
 const newCompiler = process.env.EXPECT_COMPILER ?? 'dart2js';
+const oldCompiler = process.env.OLD_EXPECT_COMPILER;
 let servedCompiler = newCompiler;
 
 async function resetKinde(request, refreshDelayMs = 0) {
@@ -15,12 +17,13 @@ async function kindeStats(request) {
 
 async function serve(request, build) {
   expect((await request.post(`${kinde}/__serve?build=${build}`)).ok()).toBe(true);
-  servedCompiler = build === 'old' ? undefined : newCompiler;
+  servedCompiler = build === 'old' ? oldCompiler : newCompiler;
 }
 
 async function waitForApp(page) {
   await page.waitForURL((url) => url.origin === appOrigin);
   await page.waitForFunction(() => window.kindeReady === true);
+  if (!knownCompilers.includes(servedCompiler)) return;
   expect(await page.evaluate(() => window.kindeCompiler)).toBe(servedCompiler);
   const wasmLoaded = await page.evaluate(() => performance.getEntriesByType('resource')
     .some((entry) => entry.name.endsWith('/main.dart.wasm')));

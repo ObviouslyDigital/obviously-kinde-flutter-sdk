@@ -117,7 +117,7 @@ async function handleKinde(request, response) {
       return send(request, response, 200, stats);
     case 'POST /__serve': {
       const build = url.searchParams.get('build');
-      if (!builds[build]) return send(request, response, 400, { error: `no ${build} build` });
+      if (!Object.hasOwn(builds, build) || !builds[build]) return send(request, response, 400, { error: `no ${build} build` });
       appRoot = builds[build];
       return send(request, response, 200, { build, appRoot });
     }
