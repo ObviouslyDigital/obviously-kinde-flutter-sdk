@@ -9,10 +9,12 @@ import 'package:kinde_flutter_sdk/src/utils/kinde_debug_print.dart';
 import 'package:kinde_flutter_sdk/src/kinde_secure_storage/kinde_secure_storage.dart';
 import 'package:kinde_flutter_sdk/src/kinde_web/src/base/web_oauth_flow.dart';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
 import 'package:kinde_flutter_sdk/src/kinde_web/src/utils/code_verifier_generator.dart';
 import 'package:kinde_flutter_sdk/src/kinde_web/src/utils/code_verifier_storage.dart';
 import 'package:kinde_flutter_sdk/src/kinde_web/src/utils/cross_platform_support.dart';
+import 'package:kinde_flutter_sdk/src/kinde_web/src/utils/page_restore.dart';
 import 'package:kinde_flutter_sdk/src/kinde_web/src/utils/pending_logins.dart';
 import 'package:oauth2/oauth2.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -36,9 +38,12 @@ class KindeWeb {
 
   late final PendingLogins _pendingLogins;
 
+  /// [listenForPageRestore] replaces the browser's back/forward cache listener in tests.
   static Future<void> initialize(
       {String? appBaseUrl,
-      required KindeSecureStorageInterface secureStorage}) async {
+      required KindeSecureStorageInterface secureStorage,
+      @visibleForTesting
+      void Function(void Function() onRestore)? listenForPageRestore}) async {
     try {
       String? tempAppBaseUrl = appBaseUrl;
 
@@ -73,11 +78,13 @@ class KindeWeb {
           message: 'Successfully validated base URL: $tempAppBaseUrl');
 
       // Proceed
-      _instance = KindeWeb._();
-      _instance?._pendingLogins = PendingLogins(
-          await SharedPreferences.getInstance(),
-          legacyState: secureStorage,
-          legacyCodeVerifier: await CodeVerifierStorage.initialize());
+      final instance = KindeWeb._()
+        .._pendingLogins = PendingLogins(await SharedPreferences.getInstance(),
+            legacyState: secureStorage,
+            legacyCodeVerifier: await CodeVerifierStorage.initialize());
+      (listenForPageRestore ?? onPageRestoredFromCache)(
+          instance._forgetLoginAttempt);
+      _instance = instance;
     } catch (e, st) {
       throw KindeError(
         code: KindeErrorCode.initializingFailed.code,
@@ -108,6 +115,10 @@ class KindeWeb {
   }
 
   bool _loginInProgress = false;
+
+  /// A page restored from the back/forward cache never left for Kinde, so it may sign in again.
+  /// Its pending login stays in storage, in case Kinde still redirects back with that `state`.
+  void _forgetLoginAttempt() => _loginInProgress = false;
 
   ///Starts the OAuth login flow. Only one login can be in progress at a time.
   ///Throws [KindeError] with [KindeErrorCode.loginInProcess] if a login is already in progress.

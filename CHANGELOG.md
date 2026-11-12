@@ -1,5 +1,9 @@
 # Changelog
 
+## [2.0.0+obv.5] - 2026-11-12
+
+- On web, a page the browser shows again from its back/forward cache (a `pageshow` event with `persisted` true, for example after pressing Back on the Kinde sign-in page) clears the login in-progress flag, so `login()` and `logout()` work again without a reload. The abandoned login stays in storage, so a callback carrying its `state` still completes.
+
 ## [2.0.0+obv.4] - 2026-11-12
 
 - On web, a token refresh runs inside a browser-wide `navigator.locks` exclusive lock named `kinde-refresh:<clientId>`, with a 5 second wait. Inside the lock, the SDK re-reads storage, uses another tab's rotated tokens instead of sending the old refresh token, and writes new tokens to storage before releasing. Saving a sign-in's tokens and clearing them on logout take the same lock, so a refresh in flight in another tab always lands before them, never after. On web, logout clears local tokens before leaving for the logout URL. Where Web Locks are unavailable or the wait times out, the compare-and-discard guard below still applies. Off the web, refresh stays single-flight within the process.
