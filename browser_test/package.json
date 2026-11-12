@@ -1,0 +1,12 @@
+{
+  "name": "kinde-flutter-sdk-browser-test",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build-app": "cd app && flutter build web --release --no-web-resources-cdn",
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.0"
+  }
+}

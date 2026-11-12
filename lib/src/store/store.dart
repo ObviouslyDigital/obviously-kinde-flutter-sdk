@@ -41,10 +41,14 @@ class Store {
     return _cachedAuthState;
   }
 
+  /// Moves on every auth state replacement, marking older reads as stale.
+  int get authStateGeneration => _authStateGeneration;
+  int _authStateGeneration = 0;
+
   set authState(AuthState? value) {
+    _authStateGeneration++;
     _cachedAuthState = value;
-    _authStateWrite =
-        _authStateWrite.then((_) => _writeAuthState(value));
+    _writes = _writes.then((_) => _writeAuthState(value));
   }
 
   Keys? get keys {
@@ -54,43 +58,56 @@ class Store {
 
   set keys(Keys? value) {
     _cachedKeys = value;
-    _writeKeys(value);
+    _writes = _writes.then((_) => _writeKeys(value));
   }
 
   // Cache to support synchronous getters
   AuthState? _cachedAuthState;
-  Future<void> _authStateWrite = Future.value();
+  Future<void> _writes = Future.value();
   Keys? _cachedKeys;
 
   // Load cached values from storage
   Future<void> loadFromStorage() async {
-    await _readAuthState();
+    _cachedAuthState = (await _readAuthState()).authState;
     await _readKeys();
   }
 
-  /// Waits for this instance's pending writes, so a reload never reads the
-  /// value from before them.
-  Future<void> reloadAuthState() async {
-    await _authStateWrite;
-    await _readAuthState();
+  /// Reads after pending writes; changes nothing if the auth state was replaced since the call.
+  Future<void> reloadAuthState() {
+    final generation = _authStateGeneration;
+    final reload = _writes.then((_) async {
+      final (:read, :authState) = await _readAuthState();
+      if (!read || generation != _authStateGeneration) return;
+
+      if (authState != _cachedAuthState) _authStateGeneration++;
+      _cachedAuthState = authState;
+    });
+    _writes = reload;
+    return reload;
   }
 
-  Future<void> _readAuthState() async {
+  /// Completes once every write queued so far has reached storage.
+  Future<void> flushWrites() => _writes;
+
+  /// [read] is false when storage could not be read, which is not the same as nothing stored.
+  Future<({bool read, AuthState? authState})> _readAuthState() async {
     try {
       final currentData = await _storage.read(key: _authStateKey);
       if (currentData == null || currentData.toLowerCase() == "null") {
-        _cachedAuthState = null;
-      } else {
-        _cachedAuthState = AuthState.fromJson(
-          jsonDecode(currentData) as Map<String, dynamic>,
-        );
+        return (read: true, authState: null);
       }
+      return (
+        read: true,
+        authState: AuthState.fromJson(
+          jsonDecode(currentData) as Map<String, dynamic>,
+        ),
+      );
     } catch (e) {
       kindeDebugPrint(
         methodName: "Store._readAuthState",
         message: "Error reading auth state: $e",
       );
-      _cachedAuthState = null;
+      return (read: false, authState: null);
     }
   }
 
@@ -135,12 +152,18 @@ class Store {
     }
   }
 
+  /// Clears memory at once; deletes run after all pending writes.
   Future<void> clear() async {
-    try {
+    _authStateGeneration++;
+    _cachedAuthState = null;
+    _cachedKeys = null;
+    final deletes = _writes.then((_) async {
       await _storage.delete(key: _authStateKey);
       await _storage.delete(key: _keysKey);
-      _cachedAuthState = null;
-      _cachedKeys = null;
+    });
+    _writes = deletes.catchError((_) {});
+    try {
+      await deletes;
     } catch (e) {
       kindeDebugPrint(
         methodName: "Store.clear",

@@ -6,6 +6,8 @@ abstract class WebUtils {
 
   static String? get getCurrentUrl => null;
 
+  static void replaceCurrentUrl(String url) {}
+
   static String? get getOriginUrl => null;
 
   static String get temporaryDirectory => "";
