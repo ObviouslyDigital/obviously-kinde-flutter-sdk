@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.0.0+obv.6] - 2026-11-12
+
+Wasm-ready: the SDK builds and runs with `flutter build web --wasm`.
+
+- Web code uses `package:web` and `dart:js_interop` in place of `dart:html`. Platform code is selected with `dart.library.js_interop`, which is true under both dart2js and dart2wasm, so a Wasm build no longer silently picks the no-op stub.
+- `flutter_secure_storage` ^9.0.0 is now `>=10.3.4 <11.0.0`, with the Wasm-ready web plugin 2.1.x on `package:web`.
+  - 10.0 to 10.3.3 are excluded because their Android migration from v9 storage can lose data.
+  - 11.x is excluded because it drops Android data written before v10. Its Windows plugin also needs `win32` ^6, which apps still on `win32` 5 cannot take (for example `file_picker` 9, `device_info_plus` 11, `package_info_plus` 8).
+- `oauth2` is now ^2.0.5 and `jose` ^0.3.5, which bring in `http` 1.x and `pointycastle` 4, so `package:js` is no longer in the dependency graph.
+- **Stored sessions on web survive the upgrade.** The web plugin keeps the same storage format: localStorage entries named `<publicKey>.<key>`, the same AES-GCM key under `publicKey`, and the same `iv.cipher` values. Pending logins in shared preferences are unchanged. A browser test signs in and starts a login on a build of the previous release, then reloads on this build: the session and the pending login carry over.
+- **Android.** The SDK no longer passes `AndroidOptions(encryptedSharedPreferences: true)`, which is deprecated in flutter_secure_storage 10. The plugin migrates such data on first access (`migrateOnAlgorithmChange`, per its changelog).
+  - Every `FlutterSecureStorage` the SDK creates (`Store` and `KindeSecureStorage`) passes `AndroidOptions(resetOnError: false)`. Version 10 defaults it to true, which erases all stored data after any read error. A read error now keeps the stored data and is handled as before: a failed auth state read keeps the cached session.
+  - iOS, macOS, Windows and Linux keep their sessions.
+
 ## [2.0.0+obv.5] - 2026-11-12
 
 - On web, a page the browser shows again from its back/forward cache (a `pageshow` event with `persisted` true, for example after pressing Back on the Kinde sign-in page) clears the login in-progress flag, so `login()` and `logout()` work again without a reload. The abandoned login stays in storage, so a callback carrying its `state` still completes.

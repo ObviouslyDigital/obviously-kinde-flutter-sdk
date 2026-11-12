@@ -1,6 +1,6 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_web_plugins/flutter_web_plugins.dart';
-import 'dart:html' as html;
+import 'package:web/web.dart' as web;
 
 class KindeFlutterWebSDK {
   static void registerWith(Registrar registrar) {
@@ -12,14 +12,14 @@ class KindeFlutterWebSDK {
     final MethodChannel methodChannel = MethodChannel(
       'kinde_flutter_sdk',
       const StandardMethodCodec(),
-      registrar.messenger,
+      registrar,
     );
 
     methodChannel.setMethodCallHandler((MethodCall call) async {
       // Handle method calls from Dart
       switch (call.method) {
         case 'getPlatformVersion':
-          String userAgent = html.window.navigator.userAgent;
+          String userAgent = web.window.navigator.userAgent;
           return 'Web $userAgent';
         default:
           throw PlatformException(

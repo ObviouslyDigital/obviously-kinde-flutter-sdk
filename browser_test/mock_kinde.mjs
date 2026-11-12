@@ -9,7 +9,11 @@ import { fileURLToPath } from 'node:url';
 const here = fileURLToPath(new URL('.', import.meta.url));
 const appPort = Number(process.env.APP_PORT ?? 47080);
 const kindePort = Number(process.env.KINDE_PORT ?? 47443);
-const appRoot = join(here, 'app', 'build', 'web');
+const builds = {
+  new: process.env.APP_ROOT ?? join(here, 'app', 'build', 'web'),
+  old: process.env.OLD_APP_ROOT,
+};
+let appRoot = builds.new;
 const certDir = join(here, '.certs');
 
 function selfSignedCertificate() {
@@ -111,6 +115,12 @@ async function handleKinde(request, response) {
       return response.end();
     case 'GET /__stats':
       return send(request, response, 200, stats);
+    case 'POST /__serve': {
+      const build = url.searchParams.get('build');
+      if (!Object.hasOwn(builds, build) || !builds[build]) return send(request, response, 400, { error: `no ${build} build` });
+      appRoot = builds[build];
+      return send(request, response, 200, { build, appRoot });
+    }
     case 'POST /__reset':
       refreshDelayMs = Number(url.searchParams.get('refreshDelayMs') ?? 0);
       stats = { refreshRequests: 0, rejectedRefreshes: 0, codeExchanges: 0 };
@@ -133,7 +143,10 @@ function handleApp(request, response) {
     response.writeHead(404);
     return response.end();
   }
-  response.writeHead(200, { 'content-type': contentTypes[extname(file)] ?? 'application/octet-stream' });
+  response.writeHead(200, {
+    'content-type': contentTypes[extname(file)] ?? 'application/octet-stream',
+    'cache-control': 'no-store',
+  });
   response.end(readFileSync(file));
 }
 

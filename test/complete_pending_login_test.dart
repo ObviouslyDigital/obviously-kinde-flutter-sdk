@@ -32,6 +32,7 @@ void main() {
   const appAuthChannel = MethodChannel('crossingthestreams.io/flutter_appauth');
   final pendingLoginPrefix = PendingLogins.storageKey('');
   final secureStorage = <String, String>{};
+  final secureStorageOptions = <Map<Object?, Object?>>[];
   final codeExchanges = <http.Request>[];
   final exchangedAccessTokens = <String, String>{};
   final replacedUrls = <String>[];
@@ -58,6 +59,7 @@ void main() {
         TestWidgetsFlutterBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(secureStorageChannel, (call) async {
       final arguments = call.arguments as Map<Object?, Object?>;
+      secureStorageOptions.add(arguments['options'] as Map<Object?, Object?>);
       final key = arguments['key'] as String?;
       switch (call.method) {
         case 'write':
@@ -701,6 +703,36 @@ void main() {
     expect(
         await completePendingLoginAt('$appUrl?code=late&state=$abandoned'),
         isTrue);
+  });
+
+  test(
+      'a stored session that cannot be read after an upgrade starts signed '
+      'out and can sign in again', () async {
+    failAuthStateReads = true;
+
+    await Store.instance.loadFromStorage();
+    expect(sdk().authState, isNull);
+    await expectLater(
+      sdk().getToken(),
+      throwsA(isA<KindeError>().having((error) => error.code, 'code',
+          KindeErrorCode.sessionExpiredOrInvalid.code)),
+    );
+
+    failAuthStateReads = false;
+    await sdk().login();
+    expect(sdk().authState?.accessToken, 'accessToken');
+  });
+
+  test('never lets Android wipe stored data after a read error', () async {
+    secureStorageOptions.clear();
+
+    await sdk().login();
+    await Store.instance.flushWrites();
+    await KindeSecureStorage().getSecureKey();
+
+    expect(secureStorageOptions, isNotEmpty);
+    expect(secureStorageOptions.map((options) => options['resetOnError']),
+        everyElement('false'));
   });
 
   test('a storage read that fails keeps the session', () async {
