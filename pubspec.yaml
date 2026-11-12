@@ -1,6 +1,6 @@
 name: kinde_flutter_sdk
 description: The Kinde SDK For Flutter.
-version: 2.0.0+obv.3
+version: 2.0.0+obv.4
 homepage: https://github.com/kinde-oss/kinde-flutter-sdk
 
 environment:
@@ -31,6 +31,7 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^3.0.0
+  http: '>=0.13.6 <2.0.0'
 
   built_value_generator: ^8.9.2
   build_runner: ^2.4.13

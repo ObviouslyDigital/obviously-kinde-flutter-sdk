@@ -1,5 +1,9 @@
 # Changelog
 
+## [2.0.0+obv.4] - 2026-11-12
+
+- On web, `completePendingLoginIfNeeded()` now exchanges the authorisation code even when tokens are already stored, so `login(orgCode: ...)` switches a signed-in user's organisation instead of keeping the old tokens. The code is exchanged only while this browser has a login in progress whose `state` matches, so a leftover or foreign code is never exchanged.
+
 ## [2.0.0+obv.1] - 2026-10-06
 
 Obviously fork of 2.0.0.
