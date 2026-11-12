@@ -61,21 +61,6 @@ class KindeSecureStorage implements KindeSecureStorageInterface {
   }
 
   @override
-  Future<void> saveAuthRequestState(String state) async {
-    try {
-      await _secureStorage.write(
-        key: SecureStorageKey.authRequestState,
-        value: state,
-      );
-    } catch (e) {
-      kindeDebugPrint(
-        methodName: "saveAuthRequestState",
-        message: e.toString(),
-      );
-    }
-  }
-
-  @override
   Future<void> removeAuthRequestState() async {
     try {
       await _secureStorage.delete(key: SecureStorageKey.authRequestState);

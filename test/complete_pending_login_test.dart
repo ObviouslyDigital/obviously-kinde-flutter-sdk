@@ -26,18 +26,23 @@ void main() {
   const appUrl = 'https://pooled-eu.example.com/';
   const authStateKey = 'kinde_auth_state';
   const legacyCodeVerifierKey = 'codeVerifier';
+  const switchedAccessToken = 'switchedOrganisationAccessToken';
   const secureStorageChannel =
       MethodChannel('plugins.it_nomads.com/flutter_secure_storage');
   const appAuthChannel = MethodChannel('crossingthestreams.io/flutter_appauth');
   final pendingLoginPrefix = PendingLogins.storageKey('');
   final secureStorage = <String, String>{};
   final codeExchanges = <http.Request>[];
+  final exchangedAccessTokens = <String, String>{};
   final dio = Dio();
   late DioAdapter dioAdapter;
   late SharedPreferences preferences;
+  var refreshRequests = 0;
   Completer<void>? refreshGate;
   Completer<void>? authStateReadGate;
   Completer<void>? authStateReadStarted;
+  Completer<void>? authStateWriteGate;
+  Completer<void>? authStateDeleteGate;
   var currentUrl = appUrl;
 
   KindeFlutterSDK sdk() => KindeFlutterSDK.instance;
@@ -52,6 +57,7 @@ void main() {
       final key = arguments['key'] as String?;
       switch (call.method) {
         case 'write':
+          if (key == authStateKey) await authStateWriteGate?.future;
           secureStorage[key!] = arguments['value'] as String;
           return null;
         case 'read':
@@ -63,6 +69,7 @@ void main() {
           }
           return value;
         case 'delete':
+          if (key == authStateKey) await authStateDeleteGate?.future;
           secureStorage.remove(key);
           return null;
         case 'deleteAll':
@@ -91,7 +98,10 @@ void main() {
           (server) => server.reply(200, null));
     dio.interceptors
         .add(InterceptorsWrapper(onRequest: (options, handler) async {
-      if (options.path == '/oauth2/token') await refreshGate?.future;
+      if (options.path == '/oauth2/token') {
+        refreshRequests++;
+        await refreshGate?.future;
+      }
       handler.next(options);
     }));
 
@@ -107,14 +117,26 @@ void main() {
 
   setUp(() async {
     codeExchanges.clear();
+    exchangedAccessTokens.clear();
     secureStorage.clear();
     await preferences.clear();
+    refreshRequests = 0;
     refreshGate = null;
     authStateReadGate = null;
     authStateReadStarted = null;
+    authStateWriteGate = null;
+    authStateDeleteGate = null;
     currentUrl = appUrl;
     await sdk().login();
   });
+
+  String unsignedJwt({required Duration expiresIn}) {
+    String encode(Map<String, Object> part) =>
+        base64Url.encode(utf8.encode(jsonEncode(part))).replaceAll('=', '');
+    final exp =
+        DateTime.now().add(expiresIn).millisecondsSinceEpoch ~/ 1000;
+    return '${encode({'alg': 'none'})}.${encode({'exp': exp})}.signature';
+  }
 
   Future<Set<String>> pendingStates() async {
     await preferences.reload();
@@ -128,6 +150,13 @@ void main() {
   String pendingCodeVerifier(String state) => (jsonDecode(
           preferences.getString(PendingLogins.storageKey(state))!)
       as Map<String, dynamic>)['codeVerifier'] as String;
+
+  Future<void> ageLogin(String state, Duration age) => preferences.setString(
+      PendingLogins.storageKey(state),
+      jsonEncode({
+        'codeVerifier': pendingCodeVerifier(state),
+        'createdAt': DateTime.now().subtract(age).millisecondsSinceEpoch,
+      }));
 
   /// Starts a web login as a newly opened tab would and returns its `state`.
   Future<String> startLoginInNewTab() async {
@@ -149,9 +178,10 @@ void main() {
         body,
         () => MockClient((request) async {
           codeExchanges.add(request);
+          final code = request.bodyFields['code'];
           return http.Response(
             jsonEncode({
-              'access_token': 'switchedOrganisationAccessToken',
+              'access_token': exchangedAccessTokens[code] ?? switchedAccessToken,
               'refresh_token': 'switchedOrganisationRefreshToken',
               'id_token': 'switchedOrganisationIdToken',
               'token_type': 'bearer',
@@ -181,6 +211,24 @@ void main() {
         'expires_in': 3600,
       });
 
+  Future<void> storeTokensFromAnotherTab(
+      {required String accessToken, required String refreshToken}) async {
+    secureStorage[authStateKey] = jsonEncode(AuthState(
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+      accessTokenExpirationDateTime:
+          DateTime.now().add(const Duration(hours: 1)),
+    ).toJson());
+    await Store.instance.reloadAuthState();
+  }
+
+  Future<void> waitFor(bool Function() condition) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 5));
+    while (!condition() && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+  }
+
   test(
       'exchanges a code whose state matches a login in progress while tokens '
       'are stored, replacing them', () async {
@@ -198,7 +246,7 @@ void main() {
     expect(codeExchanges.single.bodyFields,
         allOf(containsPair('code', 'switchCode'),
             containsPair('code_verifier', codeVerifier)));
-    expect(sdk().authState?.accessToken, 'switchedOrganisationAccessToken');
+    expect(sdk().authState?.accessToken, switchedAccessToken);
     expect(sdk().authState?.refreshToken, 'switchedOrganisationRefreshToken');
     expect(sdk().authState?.idToken, 'switchedOrganisationIdToken');
     expect(await pendingStates(), isEmpty);
@@ -233,7 +281,7 @@ void main() {
 
     expect(completions, [isTrue, isTrue]);
     expect(codeExchanges, hasLength(1));
-    expect(sdk().authState?.accessToken, 'switchedOrganisationAccessToken');
+    expect(sdk().authState?.accessToken, switchedAccessToken);
   });
 
   test(
@@ -275,25 +323,29 @@ void main() {
     expect(await pendingStates(), {state});
   });
 
-  test('ignores and prunes a login started more than ten minutes ago',
+  test('a login completing after 11 minutes still exchanges its code',
       () async {
     final state = await startLoginInNewTab();
-    final elevenMinutesAgo = DateTime.now()
-        .subtract(const Duration(minutes: 11))
-        .millisecondsSinceEpoch;
-    await preferences.setString(
-        PendingLogins.storageKey(state),
-        jsonEncode({
-          'codeVerifier': pendingCodeVerifier(state),
-          'createdAt': elevenMinutesAgo,
-        }));
+    await ageLogin(state, const Duration(minutes: 11));
 
     final completed =
-        await completePendingLoginAt('$appUrl?code=lateCode&state=$state');
+        await completePendingLoginAt('$appUrl?code=slowCode&state=$state');
 
-    expect(completed, isFalse);
-    expect(codeExchanges, isEmpty);
-    expect(await pendingStates(), isEmpty);
+    expect(completed, isTrue);
+    expect(codeExchanges, hasLength(1));
+    expect(sdk().authState?.accessToken, switchedAccessToken);
+  });
+
+  test('prunes other logins started more than a day ago on completion',
+      () async {
+    final abandoned = await startLoginInNewTab();
+    final recent = await startLoginInNewTab();
+    final current = await startLoginInNewTab();
+    await ageLogin(abandoned, const Duration(hours: 25));
+
+    await completePendingLoginAt('$appUrl?code=switchCode&state=$current');
+
+    expect(await pendingStates(), {recent});
   });
 
   test('completes a login started before per-state logins once', () async {
@@ -366,21 +418,37 @@ void main() {
     await completePendingLoginAt('$appUrl?code=switchCode&state=$state');
     refreshGate!.complete();
 
-    expect(await lateRefresh, 'switchedOrganisationAccessToken');
-    expect(sdk().authState?.accessToken, 'switchedOrganisationAccessToken');
+    expect(await lateRefresh, switchedAccessToken);
+    expect(sdk().authState?.accessToken, switchedAccessToken);
     expect(sdk().authState?.refreshToken, 'switchedOrganisationRefreshToken');
   });
 
   test(
-      'a rejected refresh token still surfaces when the auth state was '
-      'replaced during the refresh', () async {
-    final state = await startLoginInNewTab();
+      'a rejected refresh after another tab rotated the tokens returns the '
+      'new tokens', () async {
     refreshGate = Completer<void>();
     replyToRefresh(400, {'error': 'invalid_grant'});
     final lateRefresh = sdk().getToken(forceRefresh: true);
     await pumpEventQueue();
 
-    await completePendingLoginAt('$appUrl?code=switchCode&state=$state');
+    await storeTokensFromAnotherTab(
+        accessToken: 'otherTabAccessToken', refreshToken: 'rotatedRefreshToken');
+    refreshGate!.complete();
+
+    expect(await lateRefresh, 'otherTabAccessToken');
+    expect(sdk().authState?.refreshToken, 'rotatedRefreshToken');
+  });
+
+  test(
+      'a rejected refresh token surfaces while the stored tokens still carry '
+      'it', () async {
+    refreshGate = Completer<void>();
+    replyToRefresh(400, {'error': 'invalid_grant'});
+    final lateRefresh = sdk().getToken(forceRefresh: true);
+    await pumpEventQueue();
+
+    await storeTokensFromAnotherTab(
+        accessToken: 'otherTabAccessToken', refreshToken: 'refreshToken');
     refreshGate!.complete();
 
     await expectLater(
@@ -388,7 +456,6 @@ void main() {
       throwsA(isA<KindeError>().having((error) => error.code, 'code',
           KindeErrorCode.refreshTokenExpired.code)),
     );
-    expect(sdk().authState?.accessToken, 'switchedOrganisationAccessToken');
   });
 
   test(
@@ -405,7 +472,40 @@ void main() {
     readGate.complete();
     await reload;
 
-    expect(sdk().authState?.accessToken, 'switchedOrganisationAccessToken');
+    expect(sdk().authState?.accessToken, switchedAccessToken);
+  });
+
+  test('a reload waiting on a write keeps a sign-in queued behind it',
+      () async {
+    final first = await startLoginInNewTab();
+    final second = await startLoginInNewTab();
+    exchangedAccessTokens['secondCode'] = 'secondSignInAccessToken';
+    final writeGate = authStateWriteGate = Completer<void>();
+
+    await completePendingLoginAt('$appUrl?code=firstCode&state=$first');
+    final reload = Store.instance.reloadAuthState();
+    await completePendingLoginAt('$appUrl?code=secondCode&state=$second');
+    writeGate.complete();
+    await reload;
+
+    expect(sdk().authState?.accessToken, 'secondSignInAccessToken');
+  });
+
+  test('a clear while a reload waits on a write stays signed out', () async {
+    final state = await startLoginInNewTab();
+    final writeGate = authStateWriteGate = Completer<void>();
+    final deleteGate = authStateDeleteGate = Completer<void>();
+
+    await completePendingLoginAt('$appUrl?code=switchCode&state=$state');
+    final reload = Store.instance.reloadAuthState();
+    final clearing = Store.instance.clear();
+    writeGate.complete();
+    await reload;
+
+    expect(sdk().authState, isNull);
+    deleteGate.complete();
+    await clearing;
+    expect(sdk().authState, isNull);
   });
 
   test(
@@ -416,21 +516,15 @@ void main() {
     final lateRefresh = sdk().getToken(forceRefresh: true);
     await pumpEventQueue();
 
-    secureStorage[authStateKey] = jsonEncode(AuthState(
-      accessToken: 'otherTabAccessToken',
-      refreshToken: 'otherTabRefreshToken',
-      accessTokenExpirationDateTime:
-          DateTime.now().add(const Duration(hours: 1)),
-    ).toJson());
-    await Store.instance.reloadAuthState();
+    await storeTokensFromAnotherTab(
+        accessToken: 'otherTabAccessToken', refreshToken: 'otherTabRefreshToken');
     refreshGate!.complete();
 
     expect(await lateRefresh, 'otherTabAccessToken');
     expect(sdk().authState?.refreshToken, 'otherTabRefreshToken');
   });
 
-  test('a refresh in flight during logout does not restore the session',
-      () async {
+  test('a refresh superseded by logout throws a signed-out error', () async {
     refreshGate = Completer<void>();
     replyToRefreshWithPreviousTokens();
     final lateRefresh = sdk().getToken(forceRefresh: true);
@@ -439,9 +533,35 @@ void main() {
     await sdk().logout(dio: dio);
     refreshGate!.complete();
 
-    expect(await lateRefresh, isNull);
+    await expectLater(
+      lateRefresh,
+      throwsA(isA<KindeError>().having((error) => error.code, 'code',
+          KindeErrorCode.sessionExpiredOrInvalid.code)),
+    );
     expect(sdk().authState, isNull);
     await Store.instance.reloadAuthState();
     expect(sdk().authState, isNull);
+  });
+
+  test('a superseded background refresh still schedules the next one',
+      () async {
+    final state = await startLoginInNewTab();
+    exchangedAccessTokens['shortLived'] =
+        unsignedJwt(expiresIn: const Duration(seconds: 11));
+    final gate = refreshGate = Completer<void>();
+    replyToRefreshWithPreviousTokens();
+
+    await completePendingLoginAt('$appUrl?code=shortLived&state=$state');
+    await waitFor(() => refreshRequests == 1);
+    expect(refreshRequests, 1, reason: 'the first background refresh');
+
+    await storeTokensFromAnotherTab(
+        accessToken: unsignedJwt(expiresIn: const Duration(seconds: 11)),
+        refreshToken: 'otherTabRefreshToken');
+    gate.complete();
+    await waitFor(() => refreshRequests == 2);
+
+    expect(refreshRequests, 2, reason: 'the next background refresh');
+    await sdk().logout(dio: dio);
   });
 }

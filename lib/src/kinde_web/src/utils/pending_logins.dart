@@ -13,7 +13,7 @@ class PendingLogins {
       : _legacyState = legacyState,
         _legacyCodeVerifier = legacyCodeVerifier;
 
-  static const lifetime = Duration(minutes: 10);
+  static const lifetime = Duration(hours: 24);
   static const _keyPrefix = 'kinde_pending_login.';
   static const _codeVerifierField = 'codeVerifier';
   static const _createdAtField = 'createdAt';
@@ -37,22 +37,21 @@ class PendingLogins {
 
   Future<void> remove(String state) => _preferences.remove(storageKey(state));
 
-  /// Removes and returns the login started with [state], or null if none.
+  /// Removes and returns the login started with [state] at any age, or null.
   Future<({String? codeVerifier})?> take(String state) async {
-    await _pruneExpired();
-
+    await _preferences.reload();
     final key = storageKey(state);
     final entry = _preferences.getString(key);
-    if (entry != null) {
-      await _preferences.remove(key);
-      final codeVerifier = _field(entry, _codeVerifierField);
-      return (
-        codeVerifier:
-            codeVerifier is String && codeVerifier.isNotEmpty ? codeVerifier : null
-      );
-    }
+    if (entry != null) await _preferences.remove(key);
+    await _pruneExpired();
 
-    return _takeLegacy(state);
+    if (entry == null) return _takeLegacy(state);
+
+    final codeVerifier = _field(entry, _codeVerifierField);
+    return (
+      codeVerifier:
+          codeVerifier is String && codeVerifier.isNotEmpty ? codeVerifier : null
+    );
   }
 
   Future<({String? codeVerifier})?> _takeLegacy(String state) async {

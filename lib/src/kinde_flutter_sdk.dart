@@ -56,7 +56,6 @@ class KindeFlutterSDK with TokenUtils {
   late TokenApi _tokenApi;
   final _tokenRefresh = SingleFlight<String?>();
   final _loginCompletion = SingleFlight<bool>();
-  AuthState? _refreshedAuthState;
   late final String? Function() _currentUrl;
   late AuthorizationServiceConfiguration _serviceConfiguration;
 
@@ -561,39 +560,51 @@ class KindeFlutterSDK with TokenUtils {
     final version = await _getVersion();
     final versionParam = 'Flutter/$version';
     final generation = _store.authStateGeneration;
+    final refreshToken = authState?.refreshToken;
     bool authStateReplaced() => generation != _store.authStateGeneration;
+
+    final Map<String, dynamic> tokens;
     try {
-      if (authState?.refreshToken == null) {
+      if (refreshToken == null) {
         throw KindeError(
           code: KindeErrorCode.sessionExpiredOrInvalid.code,
         );
       }
-      final previousRefreshToken = _store.authState!.refreshToken;
-      final data = await _tokenApi.retrieveToken(
+      tokens = Map<String, dynamic>.from(await _tokenApi.retrieveToken(
           versionParam,
           _store.authState!.createRequestTokenParam()
-            ..putIfAbsent(_clientIdParamName, () => _config!.authClientId));
-      if (authStateReplaced()) return _store.authState?.accessToken;
-
-      // RFC 6749 section 6: a response without a refresh token keeps the old one.
-      final tokens = Map<String, dynamic>.from(data);
-      tokens['refresh_token'] ??= previousRefreshToken;
-      final refreshed = _refreshedAuthState = AuthState.fromJson(tokens);
-      _store.authState = refreshed;
-      _kindeApi.setBearerAuth(_bearerAuth, refreshed.accessToken ?? '');
-      return refreshed.accessToken;
+            ..putIfAbsent(_clientIdParamName, () => _config!.authClientId)));
     } catch (e, st) {
       final error = KindeError.fromError(e, st);
-      if (authStateReplaced() && !_endsSession(error)) {
-        return _store.authState?.accessToken;
-      }
-      throw error;
+      final rejectedTokensStillStored =
+          error.code == KindeErrorCode.refreshTokenExpired.code &&
+              _store.authState?.refreshToken == refreshToken;
+      if (!authStateReplaced() || rejectedTokensStillStored) throw error;
+      return _currentAccessToken();
+    }
+    if (authStateReplaced()) return _currentAccessToken();
+
+    try {
+      // RFC 6749 section 6: a response without a refresh token keeps the old one.
+      tokens['refresh_token'] ??= refreshToken;
+      _store.authState = AuthState.fromJson(tokens);
+      _kindeApi.setBearerAuth(_bearerAuth, _store.authState?.accessToken ?? '');
+      return _store.authState?.accessToken;
+    } catch (e, st) {
+      throw KindeError.fromError(e, st);
     }
   }
 
-  static bool _endsSession(KindeError error) =>
-      error.code == KindeErrorCode.refreshTokenExpired.code ||
-      error.code == 'invalid_grant';
+  String? _currentAccessToken() {
+    final current = _store.authState;
+    if (current == null) {
+      throw KindeError(
+        code: KindeErrorCode.sessionExpiredOrInvalid.code,
+        message: 'Signed out while the token refresh was in flight.',
+      );
+    }
+    return current.accessToken;
+  }
 
   /// Checks if the user is authenticated with a valid, non-expired token.
   ///
@@ -776,24 +787,25 @@ class KindeFlutterSDK with TokenUtils {
   /// Uses [forceRefresh] parameter to bypass the isAuthenticated() check,
   /// allowing refresh to occur before the token actually expires.
   Future<void> _performBackgroundRefresh() async {
+    final generation = _store.authStateGeneration;
     try {
       // Force refresh even if token is still valid (that's the point!)
       await getToken(forceRefresh: true);
-
-      // After successful refresh, schedule the next one (recursive pattern)
-      if (identical(_store.authState, _refreshedAuthState)) {
-        _scheduleNextRefresh();
-      }
     } catch (e) {
-      // If refresh fails, clear timer
-      // User will need to re-authenticate manually
-      _clearRefreshTimer();
       kindeDebugPrint(
         methodName: '_performBackgroundRefresh',
         message: 'Background refresh failed: $e',
       );
+      // Rescheduling from the tokens that just failed would retry every second.
+      if (generation == _store.authStateGeneration) {
+        _clearRefreshTimer();
+        return;
+      }
     }
+
+    _scheduleNextRefresh();
   }
+
 
   Future<String> _getVersion() async {
     try {

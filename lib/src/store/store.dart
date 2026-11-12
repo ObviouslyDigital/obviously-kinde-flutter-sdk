@@ -72,20 +72,27 @@ class Store {
     await _readKeys();
   }
 
-  /// Waits for this instance's pending writes, so a reload never reads the
-  /// value from before them.
-  Future<void> reloadAuthState() async {
-    await _writes;
+  /// Reads after pending writes; changes nothing if the auth state was replaced since the call.
+  Future<void> reloadAuthState() {
     final generation = _authStateGeneration;
-    final stored = await _readAuthState();
-    if (generation != _authStateGeneration) return;
+    final reload = _writes.then((_) async {
+      final stored = await _readAuthState();
+      if (generation != _authStateGeneration) return;
 
-    if (!_isSameAuthState(stored, _cachedAuthState)) _authStateGeneration++;
-    _cachedAuthState = stored;
+      if (!_isSameAuthState(stored, _cachedAuthState)) _authStateGeneration++;
+      _cachedAuthState = stored;
+    });
+    _writes = reload;
+    return reload;
   }
 
   static bool _isSameAuthState(AuthState? a, AuthState? b) =>
-      jsonEncode(a?.toJson()) == jsonEncode(b?.toJson());
+      a?.accessToken == b?.accessToken &&
+      a?.refreshToken == b?.refreshToken &&
+      a?.idToken == b?.idToken &&
+      a?.accessTokenExpirationDateTime == b?.accessTokenExpirationDateTime &&
+      a?.grantType == b?.grantType &&
+      a?.scope == b?.scope;
 
   Future<AuthState?> _readAuthState() async {
     try {

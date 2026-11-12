@@ -104,7 +104,6 @@ class KindeWeb {
           code: KindeErrorCode.invalidRedirect.code,
           message: 'Unsafe or untrusted logout URL detected');
     }
-    _loginInProgress = false;
     WebUtils.replacePage(logoutUrl);
   }
 
