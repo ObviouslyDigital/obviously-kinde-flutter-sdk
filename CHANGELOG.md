@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.0.0+obv.6] - 2026-11-12
+
+Wasm-ready: the SDK builds and runs with `flutter build web --wasm`.
+
+- Web code uses `package:web` and `dart:js_interop` in place of `dart:html`. Platform code is selected with `dart.library.js_interop`, which is true under both dart2js and dart2wasm, so a Wasm build no longer silently picks the no-op stub.
+- `flutter_secure_storage` ^9.0.0 is now ^11.2.0, with the web plugin 2.1.1, which uses `package:web`. `oauth2` is now ^2.0.5 and `jose` ^0.3.5, which bring in `http` 1.x and `pointycastle` 4, so `package:js` is no longer in the dependency graph.
+- **Stored sessions on web survive the upgrade.** The web plugin keeps the same storage format: localStorage entries named `<publicKey>.<key>`, the same AES-GCM key under `publicKey`, and the same `iv.cipher` values. Pending logins in shared preferences are unchanged. A browser test signs in and starts a login on a 2.0.0+obv.4 build, then reloads on this build: the session and the pending login carry over.
+- **Android: one-time sign-in again.** `AndroidOptions(encryptedSharedPreferences: true)` no longer exists in flutter_secure_storage 11. Its maintainers state that data written before v10 is unusable after a direct upgrade to v11. Such a session is read as nothing stored, so the user signs in again once, with no crash and no loop. iOS, macOS, Windows and Linux keep their sessions.
+
 ## [2.0.0+obv.5] - 2026-11-12
 
 - On web, a page the browser shows again from its back/forward cache (a `pageshow` event with `persisted` true, for example after pressing Back on the Kinde sign-in page) clears the login in-progress flag, so `login()` and `logout()` work again without a reload. The abandoned login stays in storage, so a callback carrying its `state` still completes.

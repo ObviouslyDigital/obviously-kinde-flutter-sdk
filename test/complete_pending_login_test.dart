@@ -703,6 +703,24 @@ void main() {
         isTrue);
   });
 
+  test(
+      'a stored session that cannot be read after an upgrade starts signed '
+      'out and can sign in again', () async {
+    failAuthStateReads = true;
+
+    await Store.instance.loadFromStorage();
+    expect(sdk().authState, isNull);
+    await expectLater(
+      sdk().getToken(),
+      throwsA(isA<KindeError>().having((error) => error.code, 'code',
+          KindeErrorCode.sessionExpiredOrInvalid.code)),
+    );
+
+    failAuthStateReads = false;
+    await sdk().login();
+    expect(sdk().authState?.accessToken, 'accessToken');
+  });
+
   test('a storage read that fails keeps the session', () async {
     failAuthStateReads = true;
 

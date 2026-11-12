@@ -25,6 +25,10 @@ Runs the SDK in real Chromium tabs that share one origin, against a local mock K
 - `tests/cross_tab.spec.mjs`: the Playwright tests. Each test gets a fresh browser context with two tabs.
   - Test (e) dispatches a synthetic `pageshow` because Playwright cannot show a real back/forward cache restore here: it launches Chromium with `--disable-back-forward-cache`, the headless shell disables the cache for its embedder, and Chromium does not cache a page that left with `location.replace`, as the SDK's login does.
 
+| (f) | A session and a pending login stored by the previous release's build (set `OLD_APP_ROOT`) | After switching to this build and reloading, the same session is signed in, and the pending login completes. Skipped without `OLD_APP_ROOT` |
+
+Every page load also checks which compiler built the app (`window.kindeCompiler`). Under Wasm it checks that `main.dart.wasm` was fetched.
+
 ## Run
 
 Needs Flutter, Node 18+ and `openssl`.
@@ -38,3 +42,12 @@ npx playwright test
 ```
 
 Rebuild the app after any change to the SDK. Ports 47080 and 47443 must be free.
+
+As WebAssembly (Chromium runs WasmGC):
+
+```bash
+(cd app && flutter build web --wasm --release --no-web-resources-cdn -o build/web-wasm)
+APP_ROOT=$PWD/app/build/web-wasm EXPECT_COMPILER=dart2wasm npx playwright test
+```
+
+Upgrade test (f): build `app/` from the previous release into a separate folder and pass it as `OLD_APP_ROOT=/path/to/that/build/web`.

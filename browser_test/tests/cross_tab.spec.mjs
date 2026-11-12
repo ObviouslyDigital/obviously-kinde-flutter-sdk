@@ -2,6 +2,8 @@ import { expect, test } from '@playwright/test';
 
 const kinde = 'https://localhost:47443';
 const appOrigin = 'http://localhost:47080';
+const newCompiler = process.env.EXPECT_COMPILER ?? 'dart2js';
+let servedCompiler = newCompiler;
 
 async function resetKinde(request, refreshDelayMs = 0) {
   await request.post(`${kinde}/__reset?refreshDelayMs=${refreshDelayMs}`);
@@ -11,9 +13,18 @@ async function kindeStats(request) {
   return (await request.get(`${kinde}/__stats`)).json();
 }
 
+async function serve(request, build) {
+  expect((await request.post(`${kinde}/__serve?build=${build}`)).ok()).toBe(true);
+  servedCompiler = build === 'old' ? undefined : newCompiler;
+}
+
 async function waitForApp(page) {
   await page.waitForURL((url) => url.origin === appOrigin);
   await page.waitForFunction(() => window.kindeReady === true);
+  expect(await page.evaluate(() => window.kindeCompiler)).toBe(servedCompiler);
+  const wasmLoaded = await page.evaluate(() => performance.getEntriesByType('resource')
+    .some((entry) => entry.name.endsWith('/main.dart.wasm')));
+  expect(wasmLoaded).toBe(servedCompiler === 'dart2wasm');
 }
 
 async function openApp(page) {
@@ -160,4 +171,42 @@ test('(e) a tab shown again from the back/forward cache can start a new login', 
   expect(state.signedIn).toBe(true);
   expect(state.org).toBe('org_pool');
   expect(stats.codeExchanges).toBe(1);
+});
+
+test('(f) a session and a pending login stored by the previous release survive the upgrade', async ({ context, request }) => {
+  test.skip(!process.env.OLD_APP_ROOT, 'set OLD_APP_ROOT to a build of the previous release');
+  const tab = await context.newPage();
+  await resetKinde(request);
+  try {
+    await serve(request, 'old');
+    await openApp(tab);
+    await signIn(tab, 'org_pool');
+    const signedInByOld = await appState(tab);
+
+    await serve(request, 'new');
+    await tab.reload();
+    await waitForApp(tab);
+    const afterUpgrade = await appState(tab);
+    const tokenAfterUpgrade = await getToken(tab, false);
+
+    await serve(request, 'old');
+    await tab.reload();
+    await waitForApp(tab);
+    await startLogin(tab, 'org_meridian');
+    await serve(request, 'new');
+    await approveLogin(tab);
+    const switchedAfterUpgrade = await appState(tab);
+    const stats = await kindeStats(request);
+
+    console.log('(f) results', JSON.stringify({ signedInByOld, afterUpgrade, tokenAfterUpgrade, switchedAfterUpgrade, stats }));
+    expect(signedInByOld.signedIn).toBe(true);
+    expect(afterUpgrade.signedIn).toBe(true);
+    expect(afterUpgrade.refreshToken).toBe(signedInByOld.refreshToken);
+    expect(tokenAfterUpgrade.error).toBeUndefined();
+    expect(stats.refreshRequests).toBe(0);
+    expect(switchedAfterUpgrade.org).toBe('org_meridian');
+    expect(stats.codeExchanges).toBe(2);
+  } finally {
+    await serve(request, 'new');
+  }
 });

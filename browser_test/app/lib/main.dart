@@ -66,5 +66,8 @@ Future<void> main() async {
         return {};
       })).toJS;
   globalContext['kindeCallbackError'] = callbackError?.toJS;
+  globalContext['kindeCompiler'] =
+      (const bool.fromEnvironment('dart.tool.dart2wasm') ? 'dart2wasm' : 'dart2js')
+          .toJS;
   globalContext['kindeReady'] = true.toJS;
 }
