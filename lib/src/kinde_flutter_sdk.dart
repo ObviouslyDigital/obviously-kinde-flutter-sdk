@@ -3,10 +3,10 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:kinde_flutter_sdk/src/additional_params.dart';
-import 'package:kinde_flutter_sdk/src/kinde_secure_storage/kinde_secure_storage_i.dart';
 import 'package:kinde_flutter_sdk/src/utils/helpers.dart';
 import 'package:kinde_flutter_sdk/src/utils/kinde_custom_types.dart';
 import 'package:kinde_flutter_sdk/src/utils/kinde_debug_print.dart';
+import 'package:kinde_flutter_sdk/src/utils/single_flight.dart';
 import 'package:kinde_flutter_sdk/src/kinde_secure_storage/kinde_secure_storage.dart';
 import 'package:kinde_flutter_sdk/src/kinde_web/kinde_web.dart';
 import 'package:kinde_flutter_sdk/src/kinde_web/src/utils/cross_platform_support.dart';
@@ -47,8 +47,6 @@ class KindeFlutterSDK with TokenUtils {
   // Singleton
   static KindeFlutterSDK? _instance;
 
-  late final KindeSecureStorageInterface _kindeSecureStorage;
-
   @override
   AuthState? get authState => _store.authState;
 
@@ -56,8 +54,9 @@ class KindeFlutterSDK with TokenUtils {
   late KindeApi _kindeApi;
   late KeysApi _keysApi;
   late TokenApi _tokenApi;
-  Future<String?>? _tokenRefresh;
-  Future<bool>? _loginCompletion;
+  final _tokenRefresh = SingleFlight<String?>();
+  final _loginCompletion = SingleFlight<bool>();
+  AuthState? _refreshedAuthState;
   late final String? Function() _currentUrl;
   late AuthorizationServiceConfiguration _serviceConfiguration;
 
@@ -66,8 +65,7 @@ class KindeFlutterSDK with TokenUtils {
   }
 
   KindeFlutterSDK._internal(
-      {KindeSecureStorageInterface? secureStorage,
-      Dio? dio,
+      {Dio? dio,
       String? Function()? currentUrl}) {
     _currentUrl =
         currentUrl ?? () => kIsWeb ? WebUtils.getCurrentUrl : null;
@@ -77,8 +75,6 @@ class KindeFlutterSDK with TokenUtils {
         message: 'KindeFlutterSDK has not been configured',
       );
     }
-
-    _kindeSecureStorage = secureStorage ?? KindeSecureStorage();
 
     var domainUrl = "";
     if (_config!.authDomain.startsWith('https')) {
@@ -173,7 +169,7 @@ class KindeFlutterSDK with TokenUtils {
       updateStep('finalization');
 
       return _instance = KindeFlutterSDK._internal(
-          secureStorage: kindeSecureStorage, dio: dio, currentUrl: currentUrl);
+          dio: dio, currentUrl: currentUrl);
     } catch (e, st) {
       _config = null;
       kindeDebugPrint(
@@ -305,7 +301,7 @@ class KindeFlutterSDK with TokenUtils {
   Future<void> _commonLogoutCleanup() async {
     // Clear refresh timer on logout (matches js-utils pattern)
     _clearRefreshTimer();
-    _tokenRefresh = null;
+    _tokenRefresh.detach();
 
     _kindeApi.setBearerAuth(_bearerAuth, '');
     await Store.instance.clear();
@@ -471,11 +467,12 @@ class KindeFlutterSDK with TokenUtils {
         additionalParameters: params);
   }
 
-  Future<bool> _finishWebLogin(String responseUrl) async {
+  Future<bool> _finishWebLogin(String responseUrl, String responseState) async {
     final credentials = await KindeWeb.instance.finishLoginFlow(
         scopes: _config!.scopes,
         redirectUrl: _config!.loginRedirectUri,
         responseUrl: responseUrl,
+        responseState: responseState,
         clientId: _config!.authClientId,
         authorizationEndpoint: _serviceConfiguration.authorizationEndpoint,
         tokenEndpoint: _serviceConfiguration.tokenEndpoint);
@@ -555,21 +552,11 @@ class KindeFlutterSDK with TokenUtils {
       return _store.authState?.accessToken;
     }
 
-    final pending = _tokenRefresh;
-    if (pending != null) return pending;
-
-    late final Future<String?> refresh;
-    refresh = _refreshToken().whenComplete(() {
-      if (identical(_tokenRefresh, refresh)) _tokenRefresh = null;
-    });
-    return _tokenRefresh = refresh;
+    return _tokenRefresh.run(_refreshToken);
   }
 
   /// Exchanges the refresh token for new tokens. Callers share one request,
   /// so a timer and a manual refresh never send the same refresh token twice.
-  ///
-  /// When a sign-in or logout replaces the auth state while the request is
-  /// in flight, its result is dropped and the current access token returned.
   Future<String?> _refreshToken() async {
     final version = await _getVersion();
     final versionParam = 'Flutter/$version';
@@ -591,14 +578,22 @@ class KindeFlutterSDK with TokenUtils {
       // RFC 6749 section 6: a response without a refresh token keeps the old one.
       final tokens = Map<String, dynamic>.from(data);
       tokens['refresh_token'] ??= previousRefreshToken;
-      _store.authState = AuthState.fromJson(tokens);
-      _kindeApi.setBearerAuth(_bearerAuth, _store.authState?.accessToken ?? '');
-      return _store.authState?.accessToken;
+      final refreshed = _refreshedAuthState = AuthState.fromJson(tokens);
+      _store.authState = refreshed;
+      _kindeApi.setBearerAuth(_bearerAuth, refreshed.accessToken ?? '');
+      return refreshed.accessToken;
     } catch (e, st) {
-      if (authStateReplaced()) return _store.authState?.accessToken;
-      throw KindeError.fromError(e, st);
+      final error = KindeError.fromError(e, st);
+      if (authStateReplaced() && !_endsSession(error)) {
+        return _store.authState?.accessToken;
+      }
+      throw error;
     }
   }
+
+  static bool _endsSession(KindeError error) =>
+      error.code == KindeErrorCode.refreshTokenExpired.code ||
+      error.code == 'invalid_grant';
 
   /// Checks if the user is authenticated with a valid, non-expired token.
   ///
@@ -648,38 +643,19 @@ class KindeFlutterSDK with TokenUtils {
   ///
   /// Call this **before** checking authentication status.
   ///
-  /// Acts only on a response whose `state` is the one this browser's login
-  /// in progress sent; any other URL returns false and changes nothing. A
-  /// matching `code` is exchanged and its tokens replace any stored ones,
-  /// which is how `login(orgCode: ...)` switches a signed-in user's
-  /// organisation. A matching `error` ends the login in progress and is
-  /// thrown as a [KindeError] whose code is the OAuth error, such as
-  /// `login_required`. Concurrent calls share one completion, so a code is
-  /// redeemed once.
-  Future<bool> completePendingLoginIfNeeded() {
-    final pending = _loginCompletion;
-    if (pending != null) return pending;
-
-    late final Future<bool> completion;
-    completion = _completePendingLogin().whenComplete(() {
-      if (identical(_loginCompletion, completion)) _loginCompletion = null;
-    });
-    return _loginCompletion = completion;
-  }
+  /// Only a response to a login this browser started is completed, once.
+  Future<bool> completePendingLoginIfNeeded() =>
+      _loginCompletion.run(_completePendingLogin);
 
   Future<bool> _completePendingLogin() async {
     final currentUrl = _currentUrl();
     final responseState = _authorisationResponseState(currentUrl);
     if (responseState == null) return false;
 
-    final loginState = await _kindeSecureStorage.getAuthRequestState();
-    if (loginState == null || responseState != loginState) return false;
-
-    return _finishWebLogin(currentUrl!);
+    return _finishWebLogin(currentUrl!, responseState);
   }
 
-  /// The `state` of [url] when it is an authorisation response, carrying a
-  /// `code` or an `error`; otherwise null.
+  /// The `state` of [url] when it carries a `code` or an `error`, else null.
   static String? _authorisationResponseState(String? url) {
     final uri = url == null ? null : Uri.tryParse(url);
     if (uri == null || !uri.hasScheme) return null;
@@ -692,7 +668,7 @@ class KindeFlutterSDK with TokenUtils {
   }
 
   _saveState(TokenResponse? tokenResponse) {
-    _tokenRefresh = null;
+    _tokenRefresh.detach();
     _clearRefreshTimer();
     _store.authState = AuthState(
         accessToken: tokenResponse?.accessToken,
@@ -805,7 +781,9 @@ class KindeFlutterSDK with TokenUtils {
       await getToken(forceRefresh: true);
 
       // After successful refresh, schedule the next one (recursive pattern)
-      _scheduleNextRefresh();
+      if (identical(_store.authState, _refreshedAuthState)) {
+        _scheduleNextRefresh();
+      }
     } catch (e) {
       // If refresh fails, clear timer
       // User will need to re-authenticate manually

@@ -2,11 +2,18 @@
 
 ## [2.0.0+obv.4] - 2026-11-12
 
-- On web, `completePendingLoginIfNeeded()` acts only on a response whose `state` matches this browser's login in progress. Any other URL returns false and leaves the login in progress untouched.
+- Web logins in progress are kept per `state`, each with its own code verifier, in shared preferences. Logins started in different tabs no longer overwrite each other. An entry expires after 10 minutes, and expired entries are pruned on every new login and every completion. A state and verifier left in the single slot by 2.0.0+obv.3 are honoured once, then removed.
+- On web, `completePendingLoginIfNeeded()` completes only a response whose `state` is a login this browser started. That login is removed and nothing else is touched. Any other URL returns false and changes nothing.
 - A matching `code` is exchanged even when tokens are already stored, and its tokens replace them, so `login(orgCode: ...)` switches a signed-in user's organisation.
-- A matching `error` (for example `login_required`) goes through the same completion as a code. It ends the login in progress and is thrown as a `KindeError` whose code is the OAuth error.
-- Concurrent calls share one completion, so a code is redeemed once.
-- The auth state carries a generation that moves on every replacement: sign-in, refresh, logout and `Store.clear`. A storage reload or a refresh that started before a replacement drops its result, so a sign-in's tokens are never overwritten by the previous ones and a logout is never undone. Logout also detaches any refresh in flight.
+- A matching `error` (for example `login_required`) goes through the same completion as a code. It ends that login and is thrown as a `KindeError` whose code is the OAuth error.
+- A matching login whose code verifier is lost is removed and throws `noCodeVerifier` once. The same URL is then ignored.
+- Concurrent completions share one run, so a code is redeemed once. Token refreshes use the same single-flight helper.
+- The auth state carries a generation. It moves on every sign-in, refresh, logout and `Store.clear`, and on a reload that finds tokens another tab stored.
+  - A reload or refresh that started before the generation moved drops a successful result, so a sign-in's tokens are never overwritten and a logout is never undone.
+  - A rejected refresh token (`refreshTokenExpired`, `invalid_grant`) still surfaces. Other errors from a superseded refresh are dropped.
+  - A background refresh schedules the next one only when its own tokens were stored.
+- Logout detaches any refresh in flight. `Store.clear` clears memory at once and deletes only after all pending auth state and keys writes.
+- `KindeWeb.finishLoginFlow` now takes the response `state` and returns null when it is not a login this browser started.
 
 ## [2.0.0+obv.3] - 2026-10-07
 

@@ -41,16 +41,14 @@ class Store {
     return _cachedAuthState;
   }
 
-  /// Moves on every replacement of the auth state, including [clear], so a
-  /// read or refresh that started before it can tell its result is stale.
+  /// Moves on every auth state replacement, marking older reads as stale.
   int get authStateGeneration => _authStateGeneration;
   int _authStateGeneration = 0;
 
   set authState(AuthState? value) {
     _authStateGeneration++;
     _cachedAuthState = value;
-    _authStateWrite =
-        _authStateWrite.then((_) => _writeAuthState(value));
+    _writes = _writes.then((_) => _writeAuthState(value));
   }
 
   Keys? get keys {
@@ -60,12 +58,12 @@ class Store {
 
   set keys(Keys? value) {
     _cachedKeys = value;
-    _writeKeys(value);
+    _writes = _writes.then((_) => _writeKeys(value));
   }
 
   // Cache to support synchronous getters
   AuthState? _cachedAuthState;
-  Future<void> _authStateWrite = Future.value();
+  Future<void> _writes = Future.value();
   Keys? _cachedKeys;
 
   // Load cached values from storage
@@ -75,14 +73,19 @@ class Store {
   }
 
   /// Waits for this instance's pending writes, so a reload never reads the
-  /// value from before them, and keeps the auth state if it was replaced
-  /// while the read was in flight.
+  /// value from before them.
   Future<void> reloadAuthState() async {
-    await _authStateWrite;
+    await _writes;
     final generation = _authStateGeneration;
     final stored = await _readAuthState();
-    if (generation == _authStateGeneration) _cachedAuthState = stored;
+    if (generation != _authStateGeneration) return;
+
+    if (!_isSameAuthState(stored, _cachedAuthState)) _authStateGeneration++;
+    _cachedAuthState = stored;
   }
+
+  static bool _isSameAuthState(AuthState? a, AuthState? b) =>
+      jsonEncode(a?.toJson()) == jsonEncode(b?.toJson());
 
   Future<AuthState?> _readAuthState() async {
     try {
@@ -143,17 +146,16 @@ class Store {
     }
   }
 
-  /// Takes effect in memory at once; the deletes run after pending writes,
-  /// so an earlier write never lands after them.
+  /// Clears memory at once; deletes run after all pending writes.
   Future<void> clear() async {
     _authStateGeneration++;
     _cachedAuthState = null;
     _cachedKeys = null;
-    final deletes = _authStateWrite.then((_) async {
+    final deletes = _writes.then((_) async {
       await _storage.delete(key: _authStateKey);
       await _storage.delete(key: _keysKey);
     });
-    _authStateWrite = deletes.catchError((_) {});
+    _writes = deletes.catchError((_) {});
     try {
       await deletes;
     } catch (e) {
