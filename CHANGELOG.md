@@ -4,8 +4,9 @@
 
 - On web, `completePendingLoginIfNeeded()` acts only on a response whose `state` matches this browser's login in progress. Any other URL returns false and leaves the login in progress untouched.
 - A matching `code` is exchanged even when tokens are already stored, and its tokens replace them, so `login(orgCode: ...)` switches a signed-in user's organisation.
-- A matching `error` (for example `login_required`) ends the login in progress and is thrown as a `KindeError` whose code is the OAuth error.
-- A refresh that was in flight when a sign-in saved new tokens is dropped, and the refresh timer is reset, so the previous tokens are never written back.
+- A matching `error` (for example `login_required`) goes through the same completion as a code. It ends the login in progress and is thrown as a `KindeError` whose code is the OAuth error.
+- Concurrent calls share one completion, so a code is redeemed once.
+- The auth state carries a generation that moves on every replacement: sign-in, refresh, logout and `Store.clear`. A storage reload or a refresh that started before a replacement drops its result, so a sign-in's tokens are never overwritten by the previous ones and a logout is never undone. Logout also detaches any refresh in flight.
 
 ## [2.0.0+obv.3] - 2026-10-07
 

@@ -11,6 +11,7 @@ import 'package:kinde_flutter_sdk/kinde_flutter_sdk.dart';
 import 'package:kinde_flutter_sdk/src/kinde_flutter_sdk.dart';
 import 'package:kinde_flutter_sdk/src/kinde_secure_storage/kinde_secure_storage.dart';
 import 'package:kinde_flutter_sdk/src/kinde_web/kinde_web.dart';
+import 'package:kinde_flutter_sdk/src/store/store.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'mock_channels.dart';
@@ -20,12 +21,17 @@ void main() {
 
   const appUrl = 'https://pooled-eu.example.com/';
   const loginState = 'state-of-the-login-in-progress';
+  const authStateKey = 'kinde_auth_state';
   const secureStorageChannel =
       MethodChannel('plugins.it_nomads.com/flutter_secure_storage');
+  const appAuthChannel = MethodChannel('crossingthestreams.io/flutter_appauth');
   final secureStorage = <String, String>{};
   final codeExchanges = <http.Request>[];
-  late DioAdapter refreshAdapter;
+  final dio = Dio();
+  late DioAdapter dioAdapter;
   Completer<void>? refreshGate;
+  Completer<void>? authStateReadGate;
+  Completer<void>? authStateReadStarted;
   var currentUrl = appUrl;
 
   KindeFlutterSDK sdk() => KindeFlutterSDK.instance;
@@ -33,8 +39,9 @@ void main() {
   setUpAll(() async {
     mockChannels.setupMockChannel();
     SharedPreferences.setMockInitialValues({});
-    TestWidgetsFlutterBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(secureStorageChannel, (call) async {
+    final messenger =
+        TestWidgetsFlutterBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(secureStorageChannel, (call) async {
       final arguments = call.arguments as Map<Object?, Object?>;
       final key = arguments['key'] as String?;
       switch (call.method) {
@@ -42,7 +49,13 @@ void main() {
           secureStorage[key!] = arguments['value'] as String;
           return null;
         case 'read':
-          return secureStorage[key];
+          final value = secureStorage[key];
+          final gate = authStateReadGate;
+          if (key == authStateKey && gate != null) {
+            authStateReadStarted?.complete();
+            await gate.future;
+          }
+          return value;
         case 'delete':
           secureStorage.remove(key);
           return null;
@@ -56,11 +69,20 @@ void main() {
       }
       return null;
     });
+    messenger.setMockMethodCallHandler(appAuthChannel, (call) async {
+      return switch (call.method) {
+        'authorizeAndExchangeCode' || 'token' => tokenResponseMap,
+        'authorize' => authorizeResponse,
+        'endSession' => <String, Object?>{'state': null},
+        _ => null,
+      };
+    });
 
-    final dio = Dio();
-    refreshAdapter = DioAdapter(dio: dio)
+    dioAdapter = DioAdapter(dio: dio)
       ..onGet('/.well-known/jwks.json',
-          (server) => server.reply(200, {'keys': []}));
+          (server) => server.reply(200, {'keys': []}))
+      ..onGet('https://auth.example.com/logout',
+          (server) => server.reply(200, null));
     dio.interceptors
         .add(InterceptorsWrapper(onRequest: (options, handler) async {
       if (options.path == '/oauth2/token') await refreshGate?.future;
@@ -72,16 +94,18 @@ void main() {
         authClientId: 'authClientId',
         loginRedirectUri: appUrl,
         logoutRedirectUri: appUrl,
-        dio: dio);
+        dio: dio,
+        currentUrl: () => currentUrl);
     await KindeWeb.initialize(
         appBaseUrl: appUrl, secureStorage: KindeSecureStorage());
-    sdk().currentWebUrlOverride = () => currentUrl;
   });
 
   setUp(() async {
     codeExchanges.clear();
     secureStorage.clear();
     refreshGate = null;
+    authStateReadGate = null;
+    authStateReadStarted = null;
     currentUrl = appUrl;
     await sdk().login();
     secureStorage[SecureStorageKey.authRequestState] = loginState;
@@ -89,26 +113,39 @@ void main() {
     await preferences.setString('codeVerifier', 'codeVerifierOfTheLogin');
   });
 
+  Future<T> withTokenEndpoint<T>(Future<T> Function() body) =>
+      http.runWithClient(
+        body,
+        () => MockClient((request) async {
+          codeExchanges.add(request);
+          return http.Response(
+            jsonEncode({
+              'access_token': 'switchedOrganisationAccessToken',
+              'refresh_token': 'switchedOrganisationRefreshToken',
+              'id_token': 'switchedOrganisationIdToken',
+              'token_type': 'bearer',
+              'expires_in': 3600,
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }),
+      );
+
   Future<bool> completePendingLoginAt(String url) {
     currentUrl = url;
-    return http.runWithClient(
-      sdk().completePendingLoginIfNeeded,
-      () => MockClient((request) async {
-        codeExchanges.add(request);
-        return http.Response(
-          jsonEncode({
-            'access_token': 'switchedOrganisationAccessToken',
-            'refresh_token': 'switchedOrganisationRefreshToken',
-            'id_token': 'switchedOrganisationIdToken',
-            'token_type': 'bearer',
-            'expires_in': 3600,
-          }),
-          200,
-          headers: {'content-type': 'application/json'},
-        );
-      }),
-    );
+    return withTokenEndpoint(sdk().completePendingLoginIfNeeded);
   }
+
+  void replyToRefreshWithPreviousTokens() => dioAdapter.onPost(
+        '/oauth2/token',
+        (server) => server.reply(200, {
+          'access_token': 'previousOrganisationAccessToken',
+          'refresh_token': 'previousOrganisationRefreshToken',
+          'expires_in': 3600,
+        }),
+        data: Matchers.any,
+      );
 
   test(
       'exchanges a code whose state matches the login in progress while '
@@ -127,6 +164,19 @@ void main() {
     expect(sdk().authState?.refreshToken, 'switchedOrganisationRefreshToken');
     expect(sdk().authState?.idToken, 'switchedOrganisationIdToken');
     expect(secureStorage[SecureStorageKey.authRequestState], isNull);
+  });
+
+  test('concurrent completions redeem the code once', () async {
+    currentUrl = '$appUrl?code=switchCode&state=$loginState';
+
+    final completions = await withTokenEndpoint(() => Future.wait([
+          sdk().completePendingLoginIfNeeded(),
+          sdk().completePendingLoginIfNeeded(),
+        ]));
+
+    expect(completions, [isTrue, isTrue]);
+    expect(codeExchanges, hasLength(1));
+    expect(sdk().authState?.accessToken, 'switchedOrganisationAccessToken');
   });
 
   test(
@@ -194,15 +244,7 @@ void main() {
       'a refresh of the previous tokens that lands after the code exchange '
       'keeps the exchanged tokens', () async {
     refreshGate = Completer<void>();
-    refreshAdapter.onPost(
-      '/oauth2/token',
-      (server) => server.reply(200, {
-        'access_token': 'previousOrganisationAccessToken',
-        'refresh_token': 'previousOrganisationRefreshToken',
-        'expires_in': 3600,
-      }),
-      data: Matchers.any,
-    );
+    replyToRefreshWithPreviousTokens();
     final lateRefresh = sdk().getToken(forceRefresh: true);
     await pumpEventQueue();
 
@@ -212,5 +254,37 @@ void main() {
     expect(await lateRefresh, 'switchedOrganisationAccessToken');
     expect(sdk().authState?.accessToken, 'switchedOrganisationAccessToken');
     expect(sdk().authState?.refreshToken, 'switchedOrganisationRefreshToken');
+  });
+
+  test(
+      'a stored-state reload that resolves after the code exchange keeps the '
+      'exchanged tokens', () async {
+    final readGate = authStateReadGate = Completer<void>();
+    final readStarted = authStateReadStarted = Completer<void>();
+    final reload = Store.instance.reloadAuthState();
+    await readStarted.future;
+    authStateReadGate = null;
+
+    await completePendingLoginAt('$appUrl?code=switchCode&state=$loginState');
+    readGate.complete();
+    await reload;
+
+    expect(sdk().authState?.accessToken, 'switchedOrganisationAccessToken');
+  });
+
+  test('a refresh in flight during logout does not restore the session',
+      () async {
+    refreshGate = Completer<void>();
+    replyToRefreshWithPreviousTokens();
+    final lateRefresh = sdk().getToken(forceRefresh: true);
+    await pumpEventQueue();
+
+    await sdk().logout(dio: dio);
+    refreshGate!.complete();
+
+    expect(await lateRefresh, isNull);
+    expect(sdk().authState, isNull);
+    await Store.instance.reloadAuthState();
+    expect(sdk().authState, isNull);
   });
 }

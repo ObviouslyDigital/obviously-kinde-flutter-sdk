@@ -41,7 +41,13 @@ class Store {
     return _cachedAuthState;
   }
 
+  /// Moves on every replacement of the auth state, including [clear], so a
+  /// read or refresh that started before it can tell its result is stale.
+  int get authStateGeneration => _authStateGeneration;
+  int _authStateGeneration = 0;
+
   set authState(AuthState? value) {
+    _authStateGeneration++;
     _cachedAuthState = value;
     _authStateWrite =
         _authStateWrite.then((_) => _writeAuthState(value));
@@ -64,33 +70,35 @@ class Store {
 
   // Load cached values from storage
   Future<void> loadFromStorage() async {
-    await _readAuthState();
+    _cachedAuthState = await _readAuthState();
     await _readKeys();
   }
 
   /// Waits for this instance's pending writes, so a reload never reads the
-  /// value from before them.
+  /// value from before them, and keeps the auth state if it was replaced
+  /// while the read was in flight.
   Future<void> reloadAuthState() async {
     await _authStateWrite;
-    await _readAuthState();
+    final generation = _authStateGeneration;
+    final stored = await _readAuthState();
+    if (generation == _authStateGeneration) _cachedAuthState = stored;
   }
 
-  Future<void> _readAuthState() async {
+  Future<AuthState?> _readAuthState() async {
     try {
       final currentData = await _storage.read(key: _authStateKey);
       if (currentData == null || currentData.toLowerCase() == "null") {
-        _cachedAuthState = null;
-      } else {
-        _cachedAuthState = AuthState.fromJson(
-          jsonDecode(currentData) as Map<String, dynamic>,
-        );
+        return null;
       }
+      return AuthState.fromJson(
+        jsonDecode(currentData) as Map<String, dynamic>,
+      );
     } catch (e) {
       kindeDebugPrint(
         methodName: "Store._readAuthState",
         message: "Error reading auth state: $e",
       );
-      _cachedAuthState = null;
+      return null;
     }
   }
 
@@ -135,12 +143,19 @@ class Store {
     }
   }
 
+  /// Takes effect in memory at once; the deletes run after pending writes,
+  /// so an earlier write never lands after them.
   Future<void> clear() async {
-    try {
+    _authStateGeneration++;
+    _cachedAuthState = null;
+    _cachedKeys = null;
+    final deletes = _authStateWrite.then((_) async {
       await _storage.delete(key: _authStateKey);
       await _storage.delete(key: _keysKey);
-      _cachedAuthState = null;
-      _cachedKeys = null;
+    });
+    _authStateWrite = deletes.catchError((_) {});
+    try {
+      await deletes;
     } catch (e) {
       kindeDebugPrint(
         methodName: "Store.clear",

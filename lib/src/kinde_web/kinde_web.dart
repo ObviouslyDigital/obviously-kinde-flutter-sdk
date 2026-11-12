@@ -183,9 +183,6 @@ class KindeWeb {
     }
   }
 
-  /// Forgets the login in progress, so its response is no longer accepted.
-  Future<void> abandonLoginFlow() => _clear();
-
   Future<void> _clear() async {
     _loginInProgress = false;
     await _kindeSecureStorage.removeAuthRequestState();
