@@ -41,6 +41,7 @@ enum KindeErrorCode {
   noCodeVerifier,
   noAuthRequestStateStored,
   authRequestStateNotMatch,
+  organizationMismatch,
 
   // Redirect & URL Errors
   notRedirectUrl,

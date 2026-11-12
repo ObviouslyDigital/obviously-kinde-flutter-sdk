@@ -3,7 +3,10 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:kinde_flutter_sdk/src/kinde_secure_storage/kinde_secure_storage_i.dart';
 import 'package:kinde_flutter_sdk/src/kinde_web/src/utils/code_verifier_storage.dart';
+import 'package:kinde_flutter_sdk/src/kinde_web/src/utils/cross_tab_lock.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+typedef PendingLogin = ({String? codeVerifier, String? orgCode});
 
 /// Web logins started in this browser and not yet completed, keyed by `state`.
 class PendingLogins {
@@ -14,8 +17,10 @@ class PendingLogins {
         _legacyCodeVerifier = legacyCodeVerifier;
 
   static const lifetime = Duration(hours: 24);
+  static const _lockTimeout = Duration(seconds: 5);
   static const _keyPrefix = 'kinde_pending_login.';
   static const _codeVerifierField = 'codeVerifier';
+  static const _orgCodeField = 'orgCode';
   static const _createdAtField = 'createdAt';
 
   final SharedPreferences _preferences;
@@ -25,12 +30,14 @@ class PendingLogins {
   @visibleForTesting
   static String storageKey(String state) => '$_keyPrefix$state';
 
-  Future<void> add(String state, String codeVerifier) async {
+  Future<void> add(String state, String codeVerifier, {String? orgCode}) async {
+    await _preferences.reload();
     await _pruneExpired();
     await _preferences.setString(
         storageKey(state),
         jsonEncode({
           _codeVerifierField: codeVerifier,
+          if (orgCode != null) _orgCodeField: orgCode,
           _createdAtField: DateTime.now().millisecondsSinceEpoch,
         }));
   }
@@ -38,7 +45,12 @@ class PendingLogins {
   Future<void> remove(String state) => _preferences.remove(storageKey(state));
 
   /// Removes and returns the login started with [state] at any age, or null.
-  Future<({String? codeVerifier})?> take(String state) async {
+  Future<PendingLogin?> take(String state) => runWithCrossTabLock(
+      'kinde-login:$state',
+      timeout: _lockTimeout,
+      task: (_) => _take(state));
+
+  Future<PendingLogin?> _take(String state) async {
     await _preferences.reload();
     final key = storageKey(state);
     final entry = _preferences.getString(key);
@@ -47,25 +59,25 @@ class PendingLogins {
 
     if (entry == null) return _takeLegacy(state);
 
-    final codeVerifier = _field(entry, _codeVerifierField);
     return (
-      codeVerifier:
-          codeVerifier is String && codeVerifier.isNotEmpty ? codeVerifier : null
+      codeVerifier: _nonEmptyString(_field(entry, _codeVerifierField)),
+      orgCode: _nonEmptyString(_field(entry, _orgCodeField)),
     );
   }
 
-  Future<({String? codeVerifier})?> _takeLegacy(String state) async {
-    if (await _legacyState.getAuthRequestState() != state) return null;
+  Future<PendingLogin?> _takeLegacy(String state) async {
+    final legacyState = await _legacyState.getAuthRequestState();
+    if (legacyState == null) return null;
 
-    await _preferences.reload();
     final codeVerifier = _legacyCodeVerifier.restore();
     await _legacyState.removeAuthRequestState();
     await _legacyCodeVerifier.clear();
-    return (codeVerifier: codeVerifier);
+    if (legacyState != state) return null;
+
+    return (codeVerifier: codeVerifier, orgCode: null);
   }
 
   Future<void> _pruneExpired() async {
-    await _preferences.reload();
     final now = DateTime.now().millisecondsSinceEpoch;
     for (final key in _preferences.getKeys()) {
       if (!key.startsWith(_keyPrefix)) continue;
@@ -77,6 +89,9 @@ class PendingLogins {
       if (expired) await _preferences.remove(key);
     }
   }
+
+  static String? _nonEmptyString(Object? value) =>
+      value is String && value.isNotEmpty ? value : null;
 
   static Object? _field(String entry, String name) {
     try {

@@ -79,20 +79,15 @@ class Store {
       final stored = await _readAuthState();
       if (generation != _authStateGeneration) return;
 
-      if (!_isSameAuthState(stored, _cachedAuthState)) _authStateGeneration++;
+      if (stored != _cachedAuthState) _authStateGeneration++;
       _cachedAuthState = stored;
     });
     _writes = reload;
     return reload;
   }
 
-  static bool _isSameAuthState(AuthState? a, AuthState? b) =>
-      a?.accessToken == b?.accessToken &&
-      a?.refreshToken == b?.refreshToken &&
-      a?.idToken == b?.idToken &&
-      a?.accessTokenExpirationDateTime == b?.accessTokenExpirationDateTime &&
-      a?.grantType == b?.grantType &&
-      a?.scope == b?.scope;
+  /// Completes once every write queued so far has reached storage.
+  Future<void> flushWrites() => _writes;
 
   Future<AuthState?> _readAuthState() async {
     try {

@@ -10,6 +10,7 @@ import 'package:kinde_flutter_sdk/src/utils/single_flight.dart';
 import 'package:kinde_flutter_sdk/src/kinde_secure_storage/kinde_secure_storage.dart';
 import 'package:kinde_flutter_sdk/src/kinde_web/kinde_web.dart';
 import 'package:kinde_flutter_sdk/src/kinde_web/src/utils/cross_platform_support.dart';
+import 'package:kinde_flutter_sdk/src/kinde_web/src/utils/cross_tab_lock.dart';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
@@ -34,6 +35,13 @@ class KindeFlutterSDK with TokenUtils {
   static const _defaultScopes = ['openid', 'profile', 'email', 'offline'];
   static const _bearerAuth = 'kindeBearerAuth';
   static const _clientIdParamName = 'client_id';
+  static const _refreshLockTimeout = Duration(seconds: 5);
+  static const _authorisationResponseParameters = {
+    'code',
+    'state',
+    'error',
+    'error_description',
+  };
 
   // Background token refresh timer (matches Kinde js-utils pattern)
   Timer? _refreshTimer;
@@ -57,6 +65,7 @@ class KindeFlutterSDK with TokenUtils {
   final _tokenRefresh = SingleFlight<String?>();
   final _loginCompletion = SingleFlight<bool>();
   late final String? Function() _currentUrl;
+  late final void Function(String url) _replaceUrl;
   late AuthorizationServiceConfiguration _serviceConfiguration;
 
   static KindeFlutterSDK get instance {
@@ -65,9 +74,11 @@ class KindeFlutterSDK with TokenUtils {
 
   KindeFlutterSDK._internal(
       {Dio? dio,
-      String? Function()? currentUrl}) {
+      String? Function()? currentUrl,
+      void Function(String url)? replaceUrl}) {
     _currentUrl =
         currentUrl ?? () => kIsWeb ? WebUtils.getCurrentUrl : null;
+    _replaceUrl = replaceUrl ?? WebUtils.replaceCurrentUrl;
     if (_config == null) {
       throw KindeError(
         code: KindeErrorCode.missingConfig.code,
@@ -141,7 +152,8 @@ class KindeFlutterSDK with TokenUtils {
       required List<String> scopes,
       String? audience,
       Dio? dio,
-      String? Function()? currentUrl}) async {
+      String? Function()? currentUrl,
+      void Function(String url)? replaceUrl}) async {
     String step = 'initializing';
     void updateStep(String newStep) {
       step = newStep;
@@ -168,7 +180,7 @@ class KindeFlutterSDK with TokenUtils {
       updateStep('finalization');
 
       return _instance = KindeFlutterSDK._internal(
-          dio: dio, currentUrl: currentUrl);
+          dio: dio, currentUrl: currentUrl, replaceUrl: replaceUrl);
     } catch (e, st) {
       _config = null;
       kindeDebugPrint(
@@ -367,7 +379,7 @@ class KindeFlutterSDK with TokenUtils {
     required InternalAdditionalParameters internalAdditionalParameters,
   }) async {
     if (kIsWeb) {
-      _handleWebLogin(internalAdditionalParameters);
+      await _handleWebLogin(internalAdditionalParameters);
     } else {
       return _handleOtherLogin(type, internalAdditionalParameters);
     }
@@ -452,10 +464,10 @@ class KindeFlutterSDK with TokenUtils {
     return authorizationTokenRequest;
   }
 
-  void _handleWebLogin(
+  Future<void> _handleWebLogin(
     InternalAdditionalParameters params,
   ) {
-    KindeWeb.instance.startLoginFlow(
+    return KindeWeb.instance.startLoginFlow(
         AuthorizationRequest(
           _config!.authClientId,
           _config!.loginRedirectUri,
@@ -467,7 +479,7 @@ class KindeFlutterSDK with TokenUtils {
   }
 
   Future<bool> _finishWebLogin(String responseUrl, String responseState) async {
-    final credentials = await KindeWeb.instance.finishLoginFlow(
+    final login = await KindeWeb.instance.finishLoginFlow(
         scopes: _config!.scopes,
         redirectUrl: _config!.loginRedirectUri,
         responseUrl: responseUrl,
@@ -476,12 +488,21 @@ class KindeFlutterSDK with TokenUtils {
         authorizationEndpoint: _serviceConfiguration.authorizationEndpoint,
         tokenEndpoint: _serviceConfiguration.tokenEndpoint);
 
-    if (credentials == null) {
+    if (login == null) {
       kindeDebugPrint(
           methodName: "finishWebLogin",
           message:
               "No credentials returned from finishLoginFlow. Login may have been canceled or failed.");
       return false;
+    }
+    final credentials = login.credentials;
+    final requestedOrgCode = login.orgCode;
+    final grantedOrgCode = _orgCodeIn(credentials.accessToken);
+    if (requestedOrgCode != null && grantedOrgCode != requestedOrgCode) {
+      throw KindeError(
+          code: KindeErrorCode.organizationMismatch.code,
+          message:
+              'Requested organization $requestedOrgCode but the token is for $grantedOrgCode.');
     }
     _saveState(TokenResponse(
       credentials.accessToken,
@@ -556,39 +577,55 @@ class KindeFlutterSDK with TokenUtils {
 
   /// Exchanges the refresh token for new tokens. Callers share one request,
   /// so a timer and a manual refresh never send the same refresh token twice.
-  Future<String?> _refreshToken() async {
+  Future<String?> _refreshToken() {
+    final heldRefreshToken = authState?.refreshToken;
+    return runWithCrossTabLock(
+      'kinde-refresh:${_config!.authClientId}',
+      timeout: _refreshLockTimeout,
+      task: (_) => _refreshUnlessAlreadyRotated(heldRefreshToken),
+    );
+  }
+
+  Future<String?> _refreshUnlessAlreadyRotated(String? heldRefreshToken) async {
+    await _store.reloadAuthState();
+    final refreshToken = authState?.refreshToken;
+    if (refreshToken == null) {
+      throw KindeError(code: KindeErrorCode.sessionExpiredOrInvalid.code);
+    }
+    if (refreshToken != heldRefreshToken) return _currentAccessToken();
+
     final version = await _getVersion();
     final versionParam = 'Flutter/$version';
     final generation = _store.authStateGeneration;
-    final refreshToken = authState?.refreshToken;
-    bool authStateReplaced() => generation != _store.authStateGeneration;
 
     final Map<String, dynamic> tokens;
     try {
-      if (refreshToken == null) {
-        throw KindeError(
-          code: KindeErrorCode.sessionExpiredOrInvalid.code,
-        );
-      }
       tokens = Map<String, dynamic>.from(await _tokenApi.retrieveToken(
           versionParam,
           _store.authState!.createRequestTokenParam()
             ..putIfAbsent(_clientIdParamName, () => _config!.authClientId)));
     } catch (e, st) {
       final error = KindeError.fromError(e, st);
+      await _store.reloadAuthState();
+      if (generation == _store.authStateGeneration) throw error;
+
       final rejectedTokensStillStored =
           error.code == KindeErrorCode.refreshTokenExpired.code &&
               _store.authState?.refreshToken == refreshToken;
-      if (!authStateReplaced() || rejectedTokensStillStored) throw error;
+      if (rejectedTokensStillStored) throw error;
       return _currentAccessToken();
     }
-    if (authStateReplaced()) return _currentAccessToken();
+
+    await _store.reloadAuthState();
+    if (generation != _store.authStateGeneration) return _currentAccessToken();
 
     try {
       // RFC 6749 section 6: a response without a refresh token keeps the old one.
       tokens['refresh_token'] ??= refreshToken;
       _store.authState = AuthState.fromJson(tokens);
       _kindeApi.setBearerAuth(_bearerAuth, _store.authState?.accessToken ?? '');
+      // Other tabs waiting on the lock read storage, so the write must land first.
+      await _store.flushWrites();
       return _store.authState?.accessToken;
     } catch (e, st) {
       throw KindeError.fromError(e, st);
@@ -663,7 +700,39 @@ class KindeFlutterSDK with TokenUtils {
     final responseState = _authorisationResponseState(currentUrl);
     if (responseState == null) return false;
 
-    return _finishWebLogin(currentUrl!, responseState);
+    final bool completed;
+    try {
+      completed = await _finishWebLogin(currentUrl!, responseState);
+    } on KindeError {
+      _replaceUrl(_withoutAuthorisationResponse(currentUrl!));
+      rethrow;
+    }
+    if (completed) _replaceUrl(_withoutAuthorisationResponse(currentUrl));
+    return completed;
+  }
+
+  static String _withoutAuthorisationResponse(String url) {
+    final uri = Uri.parse(url);
+    final kept = Map.of(uri.queryParameters)
+      ..removeWhere((name, _) => _authorisationResponseParameters.contains(name));
+    return Uri(
+      scheme: uri.scheme,
+      userInfo: uri.userInfo,
+      host: uri.host,
+      port: uri.hasPort ? uri.port : null,
+      path: uri.path,
+      queryParameters: kept.isEmpty ? null : kept,
+      fragment: uri.hasFragment ? uri.fragment : null,
+    ).toString();
+  }
+
+  String? _orgCodeIn(String accessToken) {
+    try {
+      final orgCode = parseToken(accessToken)['org_code'];
+      return orgCode is String ? orgCode : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   /// The `state` of [url] when it carries a `code` or an `error`, else null.
@@ -787,7 +856,7 @@ class KindeFlutterSDK with TokenUtils {
   /// Uses [forceRefresh] parameter to bypass the isAuthenticated() check,
   /// allowing refresh to occur before the token actually expires.
   Future<void> _performBackgroundRefresh() async {
-    final generation = _store.authStateGeneration;
+    final triedRefreshToken = authState?.refreshToken;
     try {
       // Force refresh even if token is still valid (that's the point!)
       await getToken(forceRefresh: true);
@@ -796,8 +865,10 @@ class KindeFlutterSDK with TokenUtils {
         methodName: '_performBackgroundRefresh',
         message: 'Background refresh failed: $e',
       );
+      await _store.reloadAuthState();
+      final storedRefreshToken = authState?.refreshToken;
       // Rescheduling from the tokens that just failed would retry every second.
-      if (generation == _store.authStateGeneration) {
+      if (storedRefreshToken == null || storedRefreshToken == triedRefreshToken) {
         _clearRefreshTimer();
         return;
       }
@@ -805,6 +876,7 @@ class KindeFlutterSDK with TokenUtils {
 
     _scheduleNextRefresh();
   }
+
 
 
   Future<String> _getVersion() async {
@@ -884,7 +956,8 @@ Future<KindeFlutterSDK> initializeKindeFlutterSdkForTest(
     List<String> scopes = KindeFlutterSDK._defaultScopes,
     String? audience,
     Dio? dio,
-    String? Function()? currentUrl}) async {
+    String? Function()? currentUrl,
+    void Function(String url)? replaceUrl}) async {
   return KindeFlutterSDK._initializeSDK(
       authDomain: authDomain,
       authClientId: authClientId,
@@ -893,5 +966,6 @@ Future<KindeFlutterSDK> initializeKindeFlutterSdkForTest(
       scopes: scopes,
       audience: audience,
       dio: dio,
-      currentUrl: currentUrl);
+      currentUrl: currentUrl,
+      replaceUrl: replaceUrl);
 }

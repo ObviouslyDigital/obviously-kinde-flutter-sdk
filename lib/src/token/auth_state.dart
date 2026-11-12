@@ -60,6 +60,20 @@ class AuthState {
     );
   }
 
+  @override
+  bool operator ==(Object other) =>
+      other is AuthState &&
+      other.accessToken == accessToken &&
+      other.refreshToken == refreshToken &&
+      other.accessTokenExpirationDateTime == accessTokenExpirationDateTime &&
+      other.idToken == idToken &&
+      other.grantType == grantType &&
+      other.scope == scope;
+
+  @override
+  int get hashCode => Object.hash(accessToken, refreshToken,
+      accessTokenExpirationDateTime, idToken, grantType, scope);
+
   bool isExpired() {
     if (accessToken == null || accessTokenExpirationDateTime == null) {
       return false;

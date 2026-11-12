@@ -1,0 +1,14 @@
+name: kinde_browser_test
+description: Flutter web app that drives the SDK from Playwright in real browser tabs.
+publish_to: none
+version: 1.0.0
+
+environment:
+  sdk: '>=3.9.2 <4.0.0'
+  flutter: '>=3.35.6'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  kinde_flutter_sdk:
+    path: ../..

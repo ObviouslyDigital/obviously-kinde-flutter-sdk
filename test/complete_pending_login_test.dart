@@ -34,6 +34,7 @@ void main() {
   final secureStorage = <String, String>{};
   final codeExchanges = <http.Request>[];
   final exchangedAccessTokens = <String, String>{};
+  final replacedUrls = <String>[];
   final dio = Dio();
   late DioAdapter dioAdapter;
   late SharedPreferences preferences;
@@ -111,13 +112,15 @@ void main() {
         loginRedirectUri: appUrl,
         logoutRedirectUri: appUrl,
         dio: dio,
-        currentUrl: () => currentUrl);
+        currentUrl: () => currentUrl,
+        replaceUrl: replacedUrls.add);
     preferences = await SharedPreferences.getInstance();
   });
 
   setUp(() async {
     codeExchanges.clear();
     exchangedAccessTokens.clear();
+    replacedUrls.clear();
     secureStorage.clear();
     await preferences.clear();
     refreshRequests = 0;
@@ -130,12 +133,14 @@ void main() {
     await sdk().login();
   });
 
-  String unsignedJwt({required Duration expiresIn}) {
+  String unsignedJwt(
+      {Duration expiresIn = const Duration(hours: 1), String? orgCode}) {
     String encode(Map<String, Object> part) =>
         base64Url.encode(utf8.encode(jsonEncode(part))).replaceAll('=', '');
     final exp =
         DateTime.now().add(expiresIn).millisecondsSinceEpoch ~/ 1000;
-    return '${encode({'alg': 'none'})}.${encode({'exp': exp})}.signature';
+    final claims = {'exp': exp, if (orgCode != null) 'org_code': orgCode};
+    return '${encode({'alg': 'none'})}.${encode(claims)}.signature';
   }
 
   Future<Set<String>> pendingStates() async {
@@ -159,7 +164,7 @@ void main() {
       }));
 
   /// Starts a web login as a newly opened tab would and returns its `state`.
-  Future<String> startLoginInNewTab() async {
+  Future<String> startLoginInNewTab({String? orgCode}) async {
     await KindeWeb.initialize(
         appBaseUrl: appUrl, secureStorage: KindeSecureStorage());
     final before = await pendingStates();
@@ -168,7 +173,7 @@ void main() {
           serviceConfiguration: const AuthorizationServiceConfiguration(
               authorizationEndpoint: 'https://auth.example.com/oauth2/auth',
               tokenEndpoint: 'https://auth.example.com/oauth2/token')),
-      additionalParameters: InternalAdditionalParameters(),
+      additionalParameters: InternalAdditionalParameters(orgCode: orgCode),
     );
     return (await pendingStates()).difference(before).single;
   }
@@ -219,7 +224,6 @@ void main() {
       accessTokenExpirationDateTime:
           DateTime.now().add(const Duration(hours: 1)),
     ).toJson());
-    await Store.instance.reloadAuthState();
   }
 
   Future<void> waitFor(bool Function() condition) async {
@@ -541,6 +545,94 @@ void main() {
     expect(sdk().authState, isNull);
     await Store.instance.reloadAuthState();
     expect(sdk().authState, isNull);
+  });
+
+  test(
+      'throws and keeps the stored session when the token is for another '
+      'organisation than the one requested', () async {
+    final state = await startLoginInNewTab(orgCode: 'org_meridian');
+    exchangedAccessTokens['wrongOrg'] = unsignedJwt(orgCode: 'org_pool');
+
+    await expectLater(
+      completePendingLoginAt('$appUrl?code=wrongOrg&state=$state'),
+      throwsA(isA<KindeError>().having((error) => error.code, 'code',
+          KindeErrorCode.organizationMismatch.code)),
+    );
+
+    expect(sdk().authState?.accessToken, 'accessToken');
+    expect(await pendingStates(), isEmpty);
+  });
+
+  test('stores the token of the organisation that was requested', () async {
+    final state = await startLoginInNewTab(orgCode: 'org_meridian');
+    final meridianToken = unsignedJwt(orgCode: 'org_meridian');
+    exchangedAccessTokens['meridian'] = meridianToken;
+
+    expect(
+        await completePendingLoginAt('$appUrl?code=meridian&state=$state'),
+        isTrue);
+
+    expect(sdk().authState?.accessToken, meridianToken);
+  });
+
+  test(
+      'removes the authorisation response from the browser URL once a '
+      'callback is handled, and only then', () async {
+    final completedState = await startLoginInNewTab();
+    final failedState = await startLoginInNewTab();
+
+    await completePendingLoginAt(
+        '$appUrl?code=switchCode&state=$completedState&tab=1#/home');
+    await expectLater(
+      completePendingLoginAt(
+          '$appUrl?error=login_required&error_description=x&state=$failedState'),
+      throwsA(isA<KindeError>()),
+    );
+    await completePendingLoginAt('$appUrl?code=foreign&state=unknownState');
+
+    expect(replacedUrls, ['$appUrl?tab=1#/home', appUrl]);
+  });
+
+  test('removes a login left in the single slot after one unmatched look',
+      () async {
+    secureStorage[SecureStorageKey.authRequestState] = 'legacyState';
+    await preferences.setString(legacyCodeVerifierKey, 'legacyCodeVerifier');
+
+    expect(
+        await completePendingLoginAt('$appUrl?code=other&state=otherState'),
+        isFalse);
+
+    expect(secureStorage[SecureStorageKey.authRequestState], isNull);
+    expect(preferences.getString(legacyCodeVerifierKey), isNull);
+    expect(
+        await completePendingLoginAt(
+            '$appUrl?code=legacyCode&state=legacyState'),
+        isFalse);
+    expect(codeExchanges, isEmpty);
+  });
+
+  test(
+      'a background refresh rejected after another tab rotated the tokens '
+      'still schedules the next one', () async {
+    final state = await startLoginInNewTab();
+    exchangedAccessTokens['shortLived'] =
+        unsignedJwt(expiresIn: const Duration(seconds: 11));
+    final gate = refreshGate = Completer<void>();
+    replyToRefresh(400, {'error': 'invalid_grant'});
+
+    await completePendingLoginAt('$appUrl?code=shortLived&state=$state');
+    await waitFor(() => refreshRequests == 1);
+    expect(refreshRequests, 1, reason: 'the first background refresh');
+
+    await storeTokensFromAnotherTab(
+        accessToken: unsignedJwt(expiresIn: const Duration(seconds: 11)),
+        refreshToken: 'rotatedRefreshToken');
+    gate.complete();
+    await waitFor(() => refreshRequests == 2);
+
+    expect(refreshRequests, 2, reason: 'the next background refresh');
+    expect(sdk().authState?.refreshToken, 'rotatedRefreshToken');
+    await sdk().logout(dio: dio);
   });
 
   test('a superseded background refresh still schedules the next one',

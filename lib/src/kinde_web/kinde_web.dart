@@ -120,21 +120,23 @@ class KindeWeb {
     final String codeVerifier = generateCodeVerifier();
     final String authState = generateAuthState();
     try {
-      await _pendingLogins.add(authState, codeVerifier);
+      await _pendingLogins.add(authState, codeVerifier,
+          orgCode: additionalParameters.orgCode);
       additionalParameters.state = authState;
-      WebOAuthFlow.login(
+      await WebOAuthFlow.login(
           configuration: configuration,
           additionalParameters: additionalParameters,
           codeVerifier: codeVerifier);
     } catch (e, st) {
-      _loginInProgress = false;
       await _pendingLogins.remove(authState);
       throw e is KindeError ? e : KindeError.fromError(e, st);
+    } finally {
+      _loginInProgress = false;
     }
   }
 
   /// Returns null when [responseState] is not a login this browser started.
-  Future<Credentials?> finishLoginFlow(
+  Future<({Credentials credentials, String? orgCode})?> finishLoginFlow(
       {required String redirectUrl,
       required String responseUrl,
       required String responseState,
@@ -145,7 +147,6 @@ class KindeWeb {
     final pendingLogin = await _pendingLogins.take(responseState);
     if (pendingLogin == null) return null;
 
-    _loginInProgress = false;
     final codeVerifier = pendingLogin.codeVerifier;
     if (codeVerifier == null) {
       throw KindeError(
@@ -162,12 +163,15 @@ class KindeWeb {
     );
 
     try {
-      return await WebOAuthFlow.finishLogin(
+      final credentials = await WebOAuthFlow.finishLogin(
           authRequestState: responseState,
           responseUrl: responseUrl,
           authorizationCodeGrant: authorizationCodeGrant,
           redirectUrl: redirectUrl,
           scopes: scopes);
+      if (credentials == null) return null;
+
+      return (credentials: credentials, orgCode: pendingLogin.orgCode);
     } catch (e, st) {
       throw KindeError.fromError(e, st);
     }

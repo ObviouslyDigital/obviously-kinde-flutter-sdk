@@ -4,8 +4,8 @@ import 'package:kinde_flutter_sdk/src/error/kinde_error.dart';
 void main() {
   group('KindeErrorCode Enum', () {
     group('Basic Enum Properties', () {
-      test('should have exactly 17 error codes', () {
-        expect(KindeErrorCode.values.length, 17);
+      test('should have exactly 18 error codes', () {
+        expect(KindeErrorCode.values.length, 18);
       });
 
       test('should convert camelCase enum names to kebab-case strings', () {
@@ -26,6 +26,8 @@ void main() {
             'no-auth-request-state-stored');
         expect(KindeErrorCode.authRequestStateNotMatch.code,
             'auth-request-state-not-match');
+        expect(KindeErrorCode.organizationMismatch.code,
+            'organization-mismatch');
         expect(KindeErrorCode.notRedirectUrl.code, 'not-redirect-url');
         expect(KindeErrorCode.invalidRedirect.code, 'invalid-redirect');
         expect(KindeErrorCode.unsupportedScheme.code, 'unsupported-scheme');

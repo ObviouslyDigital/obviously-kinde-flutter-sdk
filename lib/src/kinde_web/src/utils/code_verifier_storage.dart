@@ -42,14 +42,4 @@ class CodeVerifierStorage {
     }
     await _sharedPreferences?.remove(_codeVerifierKey);
   }
-
-  /// Saves the state of [codeVerifier].
-  /// Only used in web.
-  Future<void> save(String codeVerifier) async {
-    if (_sharedPreferences == null) {
-      debugPrint('SharedPreferences not initialized');
-      return;
-    }
-    await _sharedPreferences!.setString(_codeVerifierKey, codeVerifier);
-  }
 }
