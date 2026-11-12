@@ -5,9 +5,15 @@
 Wasm-ready: the SDK builds and runs with `flutter build web --wasm`.
 
 - Web code uses `package:web` and `dart:js_interop` in place of `dart:html`. Platform code is selected with `dart.library.js_interop`, which is true under both dart2js and dart2wasm, so a Wasm build no longer silently picks the no-op stub.
-- `flutter_secure_storage` ^9.0.0 is now ^11.2.0, with the web plugin 2.1.1, which uses `package:web`. `oauth2` is now ^2.0.5 and `jose` ^0.3.5, which bring in `http` 1.x and `pointycastle` 4, so `package:js` is no longer in the dependency graph.
+- `flutter_secure_storage` ^9.0.0 is now `>=10.0.0 <12.0.0`. Both majors use the Wasm-ready web plugin 2.1.x on `package:web`.
+  - 11.x matches upstream kinde-oss, but its Windows plugin needs `win32` ^6. That conflicts with apps still on `win32` 5 (for example `file_picker` 9, `device_info_plus` 11, `package_info_plus` 8).
+  - Such apps resolve 10.3.x instead.
+- `oauth2` is now ^2.0.5 and `jose` ^0.3.5, which bring in `http` 1.x and `pointycastle` 4, so `package:js` is no longer in the dependency graph.
 - **Stored sessions on web survive the upgrade.** The web plugin keeps the same storage format: localStorage entries named `<publicKey>.<key>`, the same AES-GCM key under `publicKey`, and the same `iv.cipher` values. Pending logins in shared preferences are unchanged. A browser test signs in and starts a login on a 2.0.0+obv.4 build, then reloads on this build: the session and the pending login carry over.
-- **Android: one-time sign-in again.** `AndroidOptions(encryptedSharedPreferences: true)` no longer exists in flutter_secure_storage 11. Its maintainers state that data written before v10 is unusable after a direct upgrade to v11. Such a session is read as nothing stored, so the user signs in again once, with no crash and no loop. iOS, macOS, Windows and Linux keep their sessions.
+- **Android.** The SDK no longer passes `AndroidOptions(encryptedSharedPreferences: true)`: it is deprecated in flutter_secure_storage 10 and removed in 11.
+  - On 10.x, the plugin migrates such data automatically (`migrateOnAlgorithmChange`, per its changelog).
+  - On 11.x, its maintainers state that data written before v10 is unusable after a direct upgrade. That session reads as nothing stored, so the user signs in again once, with no crash and no loop.
+  - iOS, macOS, Windows and Linux keep their sessions.
 
 ## [2.0.0+obv.5] - 2026-11-12
 
